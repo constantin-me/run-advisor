@@ -1,0 +1,23 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and deploy
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: deploy
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd ~/garmin-connector
+            git pull
+            sudo docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+            sudo docker compose exec -T backend alembic upgrade head

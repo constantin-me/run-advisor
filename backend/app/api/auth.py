@@ -2,7 +2,8 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import InvalidInitData, create_session_token, validate_init_data, validate_login_widget_data
@@ -39,15 +40,19 @@ class AuthConfig(BaseModel):
 
 
 async def _get_or_create_user(db: AsyncSession, telegram_id: int, username: str | None) -> User:
-    result = await db.execute(select(User).where(User.telegram_id == telegram_id))
-    user = result.scalar_one_or_none()
-    if user is None:
-        user = User(telegram_id=telegram_id, telegram_username=username)
-        db.add(user)
-        await db.commit()
-    elif username and user.telegram_username != username:
-        user.telegram_username = username
-        await db.commit()
+    """Atomic upsert — SELECT-then-INSERT has a real TOCTOU race under
+    concurrent/duplicate requests (hit in practice: a double-fired frontend
+    effect caused two near-simultaneous calls, and the second's INSERT hit
+    the unique constraint and 500'd). A single INSERT ... ON CONFLICT is
+    race-safe at the DB level regardless of what the caller does."""
+    insert_stmt = pg_insert(User).values(telegram_id=telegram_id, telegram_username=username)
+    stmt = insert_stmt.on_conflict_do_update(
+        index_elements=[User.telegram_id],
+        set_={"telegram_username": func.coalesce(insert_stmt.excluded.telegram_username, User.telegram_username)},
+    ).returning(User)
+    result = await db.execute(stmt)
+    user = result.scalar_one()
+    await db.commit()
     return user
 
 

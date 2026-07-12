@@ -141,6 +141,18 @@ In @BotFather: set the Mini App URL to `https://coach.example.com`.
 
 ## Redeploying after code changes
 
+**Automatic**: `.github/workflows/deploy.yml` runs this same sequence via
+SSH on every push to `master` (also runs on demand — Actions tab →
+"Deploy to production" → Run workflow). Uses a dedicated SSH keypair
+(separate from your personal key and from the droplet's own read-only
+GitHub deploy key) added to `deploy`'s `authorized_keys`, with the private
+half stored as the `DEPLOY_SSH_KEY` repo secret and the droplet's IP as
+`DEPLOY_HOST`. That key has no other access — if it ever needs to be
+revoked, just remove its line from `~/.ssh/authorized_keys` on the droplet
+and generate a new one.
+
+**Manual**, if you ever need it:
+
 ```
 cd ~/garmin-connector
 git pull
