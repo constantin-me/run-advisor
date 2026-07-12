@@ -1,5 +1,12 @@
-# Production overlay: adds Caddy as a reverse proxy with automatic HTTPS.
+# Production overlay: adds Caddy as a reverse proxy in front of the app.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# HTTPS here is a Cloudflare Origin Certificate (the domain is Cloudflare-
+# proxied, so Caddy can't use automatic Let's Encrypt via HTTP-01 — Cloudflare
+# terminates the client-facing TLS itself). Set Cloudflare's SSL/TLS mode to
+# "Full (strict)" so Cloudflare validates this cert too. Put the cert files
+# at deploy/certs/origin.pem and deploy/certs/origin-key.pem (gitignored,
+# never commit them) — see deploy/README.md.
 #
 # The base docker-compose.yml already binds backend's port to 127.0.0.1 only,
 # so nothing is reachable from outside except through Caddy on 80/443.
@@ -20,6 +27,7 @@ services:
       DOMAIN: ${DOMAIN:?Set DOMAIN in .env, e.g. DOMAIN=coach.example.com}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/certs:/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

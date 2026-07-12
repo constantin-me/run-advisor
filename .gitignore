@@ -1,4 +1,5 @@
 .env
+deploy/certs/
 __pycache__/
 *.pyc
 .venv/
