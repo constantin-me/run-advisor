@@ -15,6 +15,16 @@ dp = Dispatcher()
 
 _API_BASE = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 
+_bot_username: str | None = None
+
+
+async def get_bot_username() -> str:
+    global _bot_username
+    if _bot_username is None:
+        me = await bot.get_me()
+        _bot_username = me.username
+    return _bot_username
+
 
 def _webapp_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(

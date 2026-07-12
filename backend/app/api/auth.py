@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import InvalidInitData, create_session_token, validate_init_data
+from app.auth import InvalidInitData, create_session_token, validate_init_data, validate_login_widget_data
 from app.config import settings
 from app.db.models import User
 from app.db.session import get_db
@@ -22,6 +22,20 @@ class SessionRequest(BaseModel):
 
 class SessionResponse(BaseModel):
     token: str
+
+
+class LoginWidgetRequest(BaseModel):
+    id: int
+    first_name: str | None = None
+    last_name: str | None = None
+    username: str | None = None
+    photo_url: str | None = None
+    auth_date: int
+    hash: str
+
+
+class AuthConfig(BaseModel):
+    bot_username: str
 
 
 async def _get_or_create_user(db: AsyncSession, telegram_id: int, username: str | None) -> User:
@@ -51,6 +65,30 @@ async def create_session(body: SessionRequest, db: AsyncSession = Depends(get_db
 
     await _get_or_create_user(db, telegram_id, tg_user.get("username"))
     return SessionResponse(token=create_session_token(telegram_id))
+
+
+@router.get("/config", response_model=AuthConfig)
+async def get_auth_config() -> AuthConfig:
+    from app.telegram.bot import get_bot_username
+
+    return AuthConfig(bot_username=await get_bot_username())
+
+
+@router.post("/telegram-login", response_model=SessionResponse)
+async def create_login_widget_session(
+    body: LoginWidgetRequest, db: AsyncSession = Depends(get_db)
+) -> SessionResponse:
+    """Session login for the plain-browser path (Telegram Login Widget),
+    used when the app isn't opened as a Telegram Mini App. Maps to the same
+    User row (by telegram_id) as the Mini App flow — same Garmin link, same
+    chat history, same everything, just a different entry point."""
+    try:
+        validate_login_widget_data(body.model_dump(exclude_none=True))
+    except InvalidInitData as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    await _get_or_create_user(db, body.id, body.username)
+    return SessionResponse(token=create_session_token(body.id))
 
 
 @router.post("/dev-session", response_model=SessionResponse)

@@ -41,6 +41,29 @@ def validate_init_data(init_data: str) -> dict:
     return pairs
 
 
+def validate_login_widget_data(data: dict) -> dict:
+    """Validate a Telegram Login Widget callback payload. Different HMAC
+    scheme from Mini App initData: secret_key = SHA256(bot_token) here,
+    vs HMAC-SHA256(bot_token, key="WebAppData") for initData."""
+    pairs = {k: str(v) for k, v in data.items() if k != "hash"}
+    received_hash = data.get("hash")
+    if not received_hash:
+        raise InvalidInitData("missing hash")
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret_key = hashlib.sha256(settings.telegram_bot_token.encode()).digest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(computed_hash, received_hash):
+        raise InvalidInitData("hash mismatch")
+
+    auth_date = int(pairs.get("auth_date", 0))
+    if time.time() - auth_date > INIT_DATA_MAX_AGE_S:
+        raise InvalidInitData("expired")
+
+    return pairs
+
+
 def create_session_token(telegram_id: int) -> str:
     payload = {"sub": str(telegram_id), "exp": int(time.time()) + settings.jwt_ttl_seconds}
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
