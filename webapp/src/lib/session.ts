@@ -1,7 +1,15 @@
-let token: string | null = null;
+const STORAGE_KEY = "garmin_coach_token";
+
+let token: string | null = localStorage.getItem(STORAGE_KEY);
 
 export function setToken(t: string): void {
   token = t;
+  localStorage.setItem(STORAGE_KEY, t);
+}
+
+export function clearToken(): void {
+  token = null;
+  localStorage.removeItem(STORAGE_KEY);
 }
 
 export function getToken(): string | null {
@@ -27,7 +35,16 @@ async function postSession(path: string, body?: object): Promise<boolean> {
   return true;
 }
 
+async function hasValidStoredToken(): Promise<boolean> {
+  if (!token) return false;
+  const res = await fetch("/api/auth/whoami", { headers: { Authorization: `Bearer ${token}` } });
+  return res.ok;
+}
+
 export async function bootstrapSession(): Promise<SessionResult> {
+  if (await hasValidStoredToken()) return "ready";
+  clearToken();
+
   const initData = getInitData();
   if (initData) {
     return (await postSession("/api/auth/session", { init_data: initData })) ? "ready" : "error";

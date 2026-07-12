@@ -14,13 +14,14 @@ from app.api.health import router as health_router
 from app.api.metrics import router as metrics_router
 from app.api.plan import router as plan_router
 from app.scheduler import register_jobs, scheduler
-from app.telegram.bot import bot, dp
+from app.telegram.bot import bot, dp, register_bot_commands
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await register_bot_commands()
     polling_task = asyncio.create_task(dp.start_polling(bot))
     register_jobs()
     scheduler.start()

@@ -21,6 +21,8 @@ services:
       POSTGRES_USER: coach
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-coach}
       POSTGRES_DB: coach
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:

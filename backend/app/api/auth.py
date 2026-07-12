@@ -6,7 +6,13 @@ from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import InvalidInitData, create_session_token, validate_init_data, validate_login_widget_data
+from app.auth import (
+    InvalidInitData,
+    create_session_token,
+    get_current_user,
+    validate_init_data,
+    validate_login_widget_data,
+)
 from app.config import settings
 from app.db.models import User
 from app.db.session import get_db
@@ -37,6 +43,11 @@ class LoginWidgetRequest(BaseModel):
 
 class AuthConfig(BaseModel):
     bot_username: str
+
+
+class WhoAmI(BaseModel):
+    telegram_id: int
+    telegram_username: str | None
 
 
 async def _get_or_create_user(db: AsyncSession, telegram_id: int, username: str | None) -> User:
@@ -70,6 +81,14 @@ async def create_session(body: SessionRequest, db: AsyncSession = Depends(get_db
 
     await _get_or_create_user(db, telegram_id, tg_user.get("username"))
     return SessionResponse(token=create_session_token(telegram_id))
+
+
+@router.get("/whoami", response_model=WhoAmI)
+async def whoami(user: User = Depends(get_current_user)) -> WhoAmI:
+    """Lightweight token-validity check — a stored web session token is
+    verified against this before being trusted on page load, since a
+    401 here means the frontend should fall back to a fresh login."""
+    return WhoAmI(telegram_id=user.telegram_id, telegram_username=user.telegram_username)
 
 
 @router.get("/config", response_model=AuthConfig)
