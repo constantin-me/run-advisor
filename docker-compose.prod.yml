@@ -1,0 +1,30 @@
+# Production overlay: adds Caddy as a reverse proxy with automatic HTTPS.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# The base docker-compose.yml already binds backend's port to 127.0.0.1 only,
+# so nothing is reachable from outside except through Caddy on 80/443.
+services:
+  backend:
+    restart: always
+
+  postgres:
+    restart: always
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env, e.g. DOMAIN=coach.example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+
+volumes:
+  caddy_data:
+  caddy_config:

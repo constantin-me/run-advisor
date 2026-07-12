@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+webapp/dist/
+backend/static/
+*.egg-info/
+*.tsbuildinfo
+.DS_Store
