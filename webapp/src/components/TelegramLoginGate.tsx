@@ -1,25 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { loginWithTelegramWidget } from "../lib/session";
 
-declare global {
-  interface Window {
-    onTelegramAuth?: (user: Record<string, unknown>) => void;
-  }
-}
-
-export default function TelegramLoginGate({ onSuccess }: { onSuccess: () => void }) {
+export default function TelegramLoginGate() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
-
-    window.onTelegramAuth = async (user) => {
-      const ok = await loginWithTelegramWidget(user);
-      if (cancelled) return;
-      if (ok) onSuccess();
-      else setError("Login failed — please try again.");
-    };
 
     (async () => {
       const res = await fetch("/api/auth/config");
@@ -28,22 +14,26 @@ export default function TelegramLoginGate({ onSuccess }: { onSuccess: () => void
         return;
       }
       const { bot_username } = await res.json();
+      if (cancelled) return;
 
+      // Redirect mode (data-auth-url), not the popup + JS-callback mode —
+      // popups get silently blocked in enough browsers that the callback
+      // mode is unreliable. This does a normal full-page navigation back
+      // to /telegram-callback with the signed auth data as query params.
       const script = document.createElement("script");
       script.src = "https://telegram.org/js/telegram-widget.js?22";
       script.async = true;
       script.setAttribute("data-telegram-login", bot_username);
       script.setAttribute("data-size", "large");
-      script.setAttribute("data-onauth", "onTelegramAuth(user)");
+      script.setAttribute("data-auth-url", `${window.location.origin}/telegram-callback`);
       script.setAttribute("data-request-access", "write");
       containerRef.current?.appendChild(script);
     })();
 
     return () => {
       cancelled = true;
-      delete window.onTelegramAuth;
     };
-  }, [onSuccess]);
+  }, []);
 
   return (
     <div className="page">

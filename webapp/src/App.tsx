@@ -7,6 +7,7 @@ import Chat from "./pages/Chat";
 import Dashboard from "./pages/Dashboard";
 import Goals from "./pages/Goals";
 import Plan from "./pages/Plan";
+import TelegramCallback from "./pages/TelegramCallback";
 
 export default function App() {
   const [status, setStatus] = useState<"loading" | SessionResult>("loading");
@@ -21,10 +22,17 @@ export default function App() {
       .catch(() => setStatus("error"));
   }, []);
 
+  return (
+    <Routes>
+      <Route path="/telegram-callback" element={<TelegramCallback onSuccess={() => setStatus("ready")} />} />
+      <Route path="*" element={<MainGate status={status} />} />
+    </Routes>
+  );
+}
+
+function MainGate({ status }: { status: "loading" | SessionResult }) {
   if (status === "loading") return null;
-  if (status === "needs-web-login") {
-    return <TelegramLoginGate onSuccess={() => setStatus("ready")} />;
-  }
+  if (status === "needs-web-login") return <TelegramLoginGate />;
   if (status === "error") {
     return <div style={{ padding: 16 }}>Could not start a session. Please reopen the app from Telegram.</div>;
   }
