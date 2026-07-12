@@ -99,18 +99,26 @@ async def _stream_agent_reply(chat_id: int, token_iter: AsyncIterator[str]) -> N
         if now - last_edit < EDIT_INTERVAL_SECONDS:
             continue
         last_edit = now
+
+        # Partial markdown (e.g. buffer == "#") can convert to an empty
+        # string mid-header — Telegram rejects an empty edit outright, so
+        # skip this cycle rather than crash the whole stream.
+        converted = to_telegram_html(buffer)
+        if not converted:
+            continue
         try:
             await bot.edit_message_text(
-                to_telegram_html(buffer), chat_id=chat_id, message_id=placeholder.message_id, parse_mode="HTML"
+                converted, chat_id=chat_id, message_id=placeholder.message_id, parse_mode="HTML"
             )
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
                 raise
 
     final_text = buffer or "…"
+    converted_final = to_telegram_html(final_text) or final_text
     try:
         await bot.edit_message_text(
-            to_telegram_html(final_text), chat_id=chat_id, message_id=placeholder.message_id, parse_mode="HTML"
+            converted_final, chat_id=chat_id, message_id=placeholder.message_id, parse_mode="HTML"
         )
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc):
