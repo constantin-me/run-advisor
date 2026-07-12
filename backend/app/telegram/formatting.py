@@ -38,3 +38,12 @@ def to_telegram_html(text: str) -> str:
     html = re.sub(r"\n{3,}", "\n\n", html)
 
     return html.strip()
+
+
+def has_visible_text(html: str) -> bool:
+    """True if html has any rendered character once tags are stripped.
+    Telegram rejects an edit/send as empty (e.g. "text must be non-empty")
+    when the tag-stripped content is blank, even if the raw string with
+    tags (like "<b></b>") is non-empty — a real case mid-stream when the
+    buffer is just a markdown header marker with no title text yet."""
+    return bool(_ANY_TAG_RE.sub("", html).strip())

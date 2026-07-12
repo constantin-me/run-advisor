@@ -17,7 +17,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db.models import User
 from app.db.session import async_session
-from app.telegram.formatting import to_telegram_html
+from app.telegram.formatting import has_visible_text, to_telegram_html
 
 bot = Bot(token=settings.telegram_bot_token)
 dp = Dispatcher()
@@ -100,11 +100,11 @@ async def _stream_agent_reply(chat_id: int, token_iter: AsyncIterator[str]) -> N
             continue
         last_edit = now
 
-        # Partial markdown (e.g. buffer == "#") can convert to an empty
-        # string mid-header — Telegram rejects an empty edit outright, so
-        # skip this cycle rather than crash the whole stream.
+        # Partial markdown (e.g. buffer == "#") can convert to tags with no
+        # visible text (e.g. "<b></b>") — Telegram rejects that edit as
+        # empty outright, so skip this cycle rather than crash the stream.
         converted = to_telegram_html(buffer)
-        if not converted:
+        if not has_visible_text(converted):
             continue
         try:
             await bot.edit_message_text(
@@ -115,7 +115,9 @@ async def _stream_agent_reply(chat_id: int, token_iter: AsyncIterator[str]) -> N
                 raise
 
     final_text = buffer or "…"
-    converted_final = to_telegram_html(final_text) or final_text
+    converted_final = to_telegram_html(final_text)
+    if not has_visible_text(converted_final):
+        converted_final = final_text
     try:
         await bot.edit_message_text(
             converted_final, chat_id=chat_id, message_id=placeholder.message_id, parse_mode="HTML"
