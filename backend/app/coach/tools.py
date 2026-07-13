@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.coach.recovery import compute_recovery_status
 from app.db.models import Activity, DailyMetric, Goal, PlanWorkout, TrainingPlan, User
 from app.weather.client import geocode, get_forecast
 
@@ -146,6 +147,14 @@ TOOL_SCHEMAS: list[dict] = [
                     }
                 },
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recovery_status",
+            "description": "Check the user's current deterministic recovery flag (green/yellow/red) based on training readiness, HRV, and resting HR trends. Call this when the user mentions how they're feeling or asks whether they should train hard today. Returns null if there isn't enough recent data.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -358,6 +367,24 @@ async def get_weather_forecast(db: AsyncSession, user: User, days: int = 3) -> d
     return {"location": user.location_name, **forecast}
 
 
+async def get_recovery_status(db: AsyncSession, user: User) -> dict:
+    status = await compute_recovery_status(db, user)
+    if status is None:
+        return {
+            "status": "unknown",
+            "message": "not enough recent data — try /sync first",
+        }
+
+    return {
+        "level": status.level,
+        "reasons": status.reasons,
+        "metric_date": status.metric_date.isoformat(),
+        "training_readiness": status.training_readiness,
+        "hrv_delta_pct": status.hrv_delta_pct,
+        "rhr_delta": status.rhr_delta,
+    }
+
+
 async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict) -> Any:
     from app.memory.client import recall_memories, store_memory as memory_store
 
@@ -385,6 +412,8 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
         return await set_location(db, user, city=arguments["city"])
     if name == "get_weather_forecast":
         return await get_weather_forecast(db, user, days=arguments.get("days", 3))
+    if name == "get_recovery_status":
+        return await get_recovery_status(db, user)
     if name == "search_memory":
         return await recall_memories(user.telegram_id, arguments["query"])
     if name == "store_memory":

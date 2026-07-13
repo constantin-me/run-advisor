@@ -32,6 +32,7 @@ BOT_COMMANDS = [
     ("lastworkout", "Analyze your most recent workout"),
     ("weather", "Check the forecast for your saved location"),
     ("location", "Set or check your location for weather"),
+    ("recovery", "Check your current recovery status"),
 ]
 
 HELP_TEXT = (
@@ -42,12 +43,15 @@ HELP_TEXT = (
     "Commands:\n"
     "/sync — pull your latest runs from Garmin\n"
     "/lastworkout — get an analysis of your most recent workout\n"
+    "/recovery — check your current recovery status\n"
     "Or just message me anything about your training."
 )
 
 LAST_WORKOUT_PROMPT = "Give me a detailed analysis of my most recent workout."
 
-_NOT_LINKED_TEXT = "Garmin isn't linked yet. Run /start, then tap Open Coach to link your account."
+_NOT_LINKED_TEXT = (
+    "Garmin isn't linked yet. Run /start, then tap Open Coach to link your account."
+)
 
 
 async def get_bot_username() -> str:
@@ -110,7 +114,10 @@ async def _stream_agent_reply(chat_id: int, token_iter: AsyncIterator[str]) -> N
             continue
         try:
             await bot.edit_message_text(
-                converted, chat_id=chat_id, message_id=placeholder.message_id, parse_mode="HTML"
+                converted,
+                chat_id=chat_id,
+                message_id=placeholder.message_id,
+                parse_mode="HTML",
             )
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
@@ -122,14 +129,19 @@ async def _stream_agent_reply(chat_id: int, token_iter: AsyncIterator[str]) -> N
         converted_final = final_text
     try:
         await bot.edit_message_text(
-            converted_final, chat_id=chat_id, message_id=placeholder.message_id, parse_mode="HTML"
+            converted_final,
+            chat_id=chat_id,
+            message_id=placeholder.message_id,
+            parse_mode="HTML",
         )
     except TelegramBadRequest as exc:
         if "message is not modified" in str(exc):
             return
         # Formatting slipped through the converter unescaped — fall back to
         # a plain-text edit so the user still gets the full reply.
-        await bot.edit_message_text(final_text, chat_id=chat_id, message_id=placeholder.message_id)
+        await bot.edit_message_text(
+            final_text, chat_id=chat_id, message_id=placeholder.message_id
+        )
 
 
 @dp.message(CommandStart())
@@ -174,7 +186,8 @@ async def last_workout_command(message: Message) -> None:
         return
 
     await _stream_agent_reply(
-        message.chat.id, stream_reply(telegram_id=message.from_user.id, text=LAST_WORKOUT_PROMPT)
+        message.chat.id,
+        stream_reply(telegram_id=message.from_user.id, text=LAST_WORKOUT_PROMPT),
     )
 
 
@@ -187,9 +200,13 @@ async def location_command(message: Message) -> None:
 
     if not city:
         if user and user.location_name:
-            await message.answer(f"Your location is set to {user.location_name}. Send /location <city> to change it.")
+            await message.answer(
+                f"Your location is set to {user.location_name}. Send /location <city> to change it."
+            )
         else:
-            await message.answer("No location set yet. Send /location <city>, e.g. /location Bucharest.")
+            await message.answer(
+                "No location set yet. Send /location <city>, e.g. /location Bucharest."
+            )
         return
 
     async with async_session() as db:
@@ -203,7 +220,9 @@ async def location_command(message: Message) -> None:
         result = await set_location(db, user, city)
 
     if "error" in result:
-        await message.answer(f'Couldn\'t find a location matching "{city}". Try a different spelling or a nearby larger city.')
+        await message.answer(
+            f'Couldn\'t find a location matching "{city}". Try a different spelling or a nearby larger city.'
+        )
         return
 
     await message.answer(f"Location set to {result['location_name']}.")
@@ -216,7 +235,9 @@ async def weather_command(message: Message) -> None:
 
     user = await _get_user_by_telegram_id(message.from_user.id)
     if user is None or user.latitude is None:
-        await message.answer("No location set yet. Send /location <city> first, e.g. /location Bucharest.")
+        await message.answer(
+            "No location set yet. Send /location <city> first, e.g. /location Bucharest."
+        )
         return
 
     async with async_session() as db:
@@ -224,17 +245,54 @@ async def weather_command(message: Message) -> None:
         forecast = await get_weather_forecast(db, db_user, days=3)
 
     if "error" in forecast:
-        await message.answer("Couldn't fetch the weather right now — try again in a bit.")
+        await message.answer(
+            "Couldn't fetch the weather right now — try again in a bit."
+        )
         return
 
-    await _send_html(message.chat.id, f"Weather for {forecast['location']}:\n\n" + _format_weather(forecast))
+    await _send_html(
+        message.chat.id,
+        f"Weather for {forecast['location']}:\n\n" + _format_weather(forecast),
+    )
+
+
+@dp.message(Command("recovery"))
+async def recovery_command(message: Message) -> None:
+    from app.coach.recovery import compute_recovery_status
+
+    user = await _get_user_by_telegram_id(message.from_user.id)
+    if user is None or not user.garmin_linked:
+        await message.answer(_NOT_LINKED_TEXT)
+        return
+
+    async with async_session() as db:
+        db_user = await db.get(User, user.id)
+        status = await compute_recovery_status(db, db_user)
+
+    if status is None:
+        await message.answer(
+            "Not enough recent data to check recovery yet — try /sync first."
+        )
+        return
+
+    reasons = (
+        "; ".join(status.reasons)
+        if status.reasons
+        else "no specific signal — recovery looks normal"
+    )
+    await message.answer(
+        f"Recovery ({status.metric_date.isoformat()}): {status.level}\n{reasons}"
+    )
 
 
 @dp.message(F.text)
 async def chat(message: Message) -> None:
     from app.coach.agent import stream_reply
 
-    await _stream_agent_reply(message.chat.id, stream_reply(telegram_id=message.from_user.id, text=message.text))
+    await _stream_agent_reply(
+        message.chat.id,
+        stream_reply(telegram_id=message.from_user.id, text=message.text),
+    )
 
 
 async def push_message(telegram_id: int, text: str) -> None:
@@ -242,4 +300,6 @@ async def push_message(telegram_id: int, text: str) -> None:
 
 
 async def register_bot_commands() -> None:
-    await bot.set_my_commands([BotCommand(command=cmd, description=desc) for cmd, desc in BOT_COMMANDS])
+    await bot.set_my_commands(
+        [BotCommand(command=cmd, description=desc) for cmd, desc in BOT_COMMANDS]
+    )

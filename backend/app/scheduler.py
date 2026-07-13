@@ -6,6 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select
 
+from app.coach.recovery import compute_recovery_status
 from app.config import settings
 from app.db.models import User
 from app.db.session import async_session
@@ -34,13 +35,38 @@ async def run_user_progress(user_id: int, day: date) -> None:
             "conversation. If something in the data is worth remembering long-term, call store_memory."
         )
 
+        # Deterministic trigger for the push to actually lead with a recovery
+        # flag, rather than hoping the LLM notices it in the data dump.
+        try:
+            recovery = await compute_recovery_status(db, user)
+        except Exception:
+            logger.exception(
+                "Recovery status computation failed for user_id=%s", user.id
+            )
+            recovery = None
+
+        if recovery is not None and recovery.level != "green":
+            reasons = (
+                "; ".join(recovery.reasons)
+                if recovery.reasons
+                else "no specific signal recorded"
+            )
+            instruction = (
+                f"IMPORTANT: recovery signals for {recovery.metric_date.isoformat()} are flagged "
+                f"({recovery.level}) — reasons: {reasons}. Lead the message with this and give one "
+                "concrete recommendation (easy day, rest, extra sleep) before anything else.\n\n"
+            ) + instruction
+
         # get_forecast never raises (it swallows and logs failures), so this
         # is safe to call unconditionally when a location is set. Uses the
         # user's own timezone (from geocoding) so "upcoming" is their local
         # next day, not UTC's — the job itself fires at UTC midnight.
         if user.latitude is not None and user.longitude is not None:
             forecast = await get_forecast(
-                float(user.latitude), float(user.longitude), user.timezone or "UTC", days=2
+                float(user.latitude),
+                float(user.longitude),
+                user.timezone or "UTC",
+                days=2,
             )
             if forecast and forecast.get("daily"):
                 upcoming = forecast["daily"][0]
@@ -59,7 +85,9 @@ async def run_user_progress(user_id: int, day: date) -> None:
         try:
             await push_message(user.telegram_id, summary)
         except Exception:
-            logger.exception("Failed to push progress message to telegram_id=%s", user.telegram_id)
+            logger.exception(
+                "Failed to push progress message to telegram_id=%s", user.telegram_id
+            )
 
 
 async def run_daily_progress_job() -> None:

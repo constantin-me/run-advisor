@@ -1,13 +1,14 @@
 import json
 import logging
 from collections.abc import AsyncGenerator
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.coach.prompts import SYSTEM_PROMPT
+from app.coach.recovery import compute_recovery_status
 from app.coach.tools import (
     TOOL_SCHEMAS,
     execute_tool,
@@ -46,11 +47,31 @@ def _format_metrics(metrics: list[dict]) -> str:
         parts = [f"sleep {m['sleep_score']}" if m["sleep_score"] is not None else None]
         parts.append(f"HRV {m['hrv']}" if m["hrv"] is not None else None)
         parts.append(f"RHR {m['resting_hr']}" if m["resting_hr"] is not None else None)
-        parts.append(f"stress {m['stress_avg']}" if m["stress_avg"] is not None else None)
-        parts.append(f"body battery {m['body_battery']}" if m["body_battery"] is not None else None)
+        parts.append(
+            f"stress {m['stress_avg']}" if m["stress_avg"] is not None else None
+        )
+        parts.append(
+            f"body battery {m['body_battery']}"
+            if m["body_battery"] is not None
+            else None
+        )
         detail = ", ".join(p for p in parts if p) or "no data"
         lines.append(f"- {m['date']}: {detail}")
     return "\n".join(lines)
+
+
+def _format_recovery(status) -> str:
+    today = date.today()
+    if status.metric_date == today:
+        when = "today's"
+    elif status.metric_date == today - timedelta(days=1):
+        when = "yesterday's"
+    else:
+        when = f"{status.metric_date.isoformat()}'s"
+    reasons = (
+        "; ".join(status.reasons) if status.reasons else "no specific signal recorded"
+    )
+    return f"Recovery flag ({when} data): {status.level} — {reasons}"
 
 
 def _format_weather(forecast: dict) -> str:
@@ -65,7 +86,11 @@ def _format_weather(forecast: dict) -> str:
         )
         window = windows_by_date.get(day["date"])
         if window:
-            parts = [f"{name} {window[name]['temp']:.0f}°C" for name in ("morning", "midday", "evening") if name in window]
+            parts = [
+                f"{name} {window[name]['temp']:.0f}°C"
+                for name in ("morning", "midday", "evening")
+                if name in window
+            ]
             if parts:
                 line += "; " + " / ".join(parts)
         lines.append(line)
@@ -80,17 +105,33 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
 
     memories = await list_recent_memories(user.telegram_id)
     if memories:
-        system_prompt += "\n\nKnown facts about this user:\n" + "\n".join(f"- {m}" for m in memories)
+        system_prompt += "\n\nKnown facts about this user:\n" + "\n".join(
+            f"- {m}" for m in memories
+        )
 
     metrics = await get_daily_metrics(db, user, days=7)
     if metrics:
-        system_prompt += "\n\nRecent health data (last 7 days, most recent first):\n" + _format_metrics(metrics)
+        system_prompt += (
+            "\n\nRecent health data (last 7 days, most recent first):\n"
+            + _format_metrics(metrics)
+        )
     else:
         system_prompt += "\n\nNo Garmin health data synced yet."
 
+    try:
+        recovery = await compute_recovery_status(db, user)
+        if recovery is not None and recovery.level != "green":
+            system_prompt += "\n\n" + _format_recovery(recovery)
+    except Exception:
+        # Never let a bug in the recovery rule engine break chat itself.
+        logger.exception("Recovery status computation failed for user_id=%s", user.id)
+
     goals = await get_goals(db, user)
     if goals:
-        goal_lines = "\n".join(f"- {g['text']}" + (f" (by {g['target_date']})" if g["target_date"] else "") for g in goals)
+        goal_lines = "\n".join(
+            f"- {g['text']}" + (f" (by {g['target_date']})" if g["target_date"] else "")
+            for g in goals
+        )
         system_prompt += "\n\nActive goals:\n" + goal_lines
     else:
         system_prompt += "\n\nNo active goals set."
@@ -105,7 +146,10 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
         try:
             forecast = await get_weather_forecast(db, user, days=2)
             if "error" not in forecast:
-                system_prompt += "\n\nWeather forecast (next 2 days, local time):\n" + _format_weather(forecast)
+                system_prompt += (
+                    "\n\nWeather forecast (next 2 days, local time):\n"
+                    + _format_weather(forecast)
+                )
         except Exception:
             # Weather is a nice-to-have, not load-bearing — never let a
             # forecast fetch problem break the whole chat turn.
@@ -114,7 +158,9 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
     return system_prompt
 
 
-async def _run_tool_loop(db: AsyncSession, user: User, messages: list[dict]) -> AsyncGenerator[str, None]:
+async def _run_tool_loop(
+    db: AsyncSession, user: User, messages: list[dict]
+) -> AsyncGenerator[str, None]:
     """Drive the OpenAI-compatible tool-calling loop over an already-built
     message list, yielding content tokens as they stream. Does not touch
     chat_messages — callers decide what (if anything) to persist."""
@@ -143,7 +189,9 @@ async def _run_tool_loop(db: AsyncSession, user: User, messages: list[dict]) -> 
                     yield delta.content
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
-                        acc = tool_calls_acc.setdefault(tc.index, {"id": None, "name": None, "arguments": ""})
+                        acc = tool_calls_acc.setdefault(
+                            tc.index, {"id": None, "name": None, "arguments": ""}
+                        )
                         if tc.id:
                             acc["id"] = tc.id
                         if tc.function and tc.function.name:
@@ -169,7 +217,13 @@ async def _run_tool_loop(db: AsyncSession, user: User, messages: list[dict]) -> 
             }
             for tc in tool_calls_acc.values()
         ]
-        messages.append({"role": "assistant", "content": content_acc or None, "tool_calls": assistant_tool_calls})
+        messages.append(
+            {
+                "role": "assistant",
+                "content": content_acc or None,
+                "tool_calls": assistant_tool_calls,
+            }
+        )
 
         for tc in tool_calls_acc.values():
             try:
@@ -182,13 +236,19 @@ async def _run_tool_loop(db: AsyncSession, user: User, messages: list[dict]) -> 
                 logger.exception("Tool %s failed", tc["name"])
                 result = {"error": str(exc)}
             messages.append(
-                {"role": "tool", "tool_call_id": tc["id"], "content": json.dumps(result, default=str)}
+                {
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": json.dumps(result, default=str),
+                }
             )
     else:
         yield "I ran out of tool-call rounds — try rephrasing your question."
 
 
-async def stream_chat(db: AsyncSession, user: User, user_message: str) -> AsyncGenerator[str, None]:
+async def stream_chat(
+    db: AsyncSession, user: User, user_message: str
+) -> AsyncGenerator[str, None]:
     db.add(ChatMessage(user_id=user.id, role="user", content=user_message))
     await db.commit()
 
@@ -215,7 +275,9 @@ async def stream_chat(db: AsyncSession, user: User, user_message: str) -> AsyncG
         await db.commit()
 
 
-async def generate_progress_summary(db: AsyncSession, user: User, instruction: str) -> str:
+async def generate_progress_summary(
+    db: AsyncSession, user: User, instruction: str
+) -> str:
     """Non-interactive coach pass used by the midnight job. Does not touch
     chat_messages — the result is pushed via Telegram, not shown as a turn
     in the visible conversation."""
