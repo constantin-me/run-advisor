@@ -109,20 +109,42 @@ async def sync_day(db: AsyncSession, user: User, day: date) -> None:
     await db.commit()
 
 
+def _extract_location(activity: dict) -> dict[str, Any] | None:
+    """GPS fields are present directly on activity dicts from the bulk
+    get_activities() endpoint (used by sync_recent_activities) but never on
+    the reduced get_activities_fordate() payload (used by sync_day) — so
+    this is a free check either way, and callers fall back to fetching
+    get_activity() only when it comes up empty."""
+    lat, lon = activity.get("startLatitude"), activity.get("startLongitude")
+    if lat is None or lon is None:
+        return None
+    return {"latitude": lat, "longitude": lon, "location_name": activity.get("locationName") or None}
+
+
+def _apply_location(user: User, location: dict[str, Any]) -> None:
+    user.latitude = location["latitude"]
+    user.longitude = location["longitude"]
+    user.location_name = location["location_name"]
+    user.timezone = _tf.timezone_at(lat=location["latitude"], lng=location["longitude"])
+
+
 async def _detect_location_from_activities(db: AsyncSession, user: User, client: Any, activities: list[dict]) -> None:
     """Auto-set the user's location from their own outdoor Garmin activities,
     so weather-aware coaching works with zero setup for anyone who runs
-    outside. get_activities_fordate (used above) never includes GPS fields
-    regardless of activity type, so this makes one extra per-activity call
-    to get_activity() — but only while no location is set yet, making it a
-    permanent no-op once resolved. Users whose activities are all indoor
-    (treadmill, pool) never get a match here, which is intentional: weather
-    genuinely doesn't matter to them, so location stays unset and the coach
-    never brings it up."""
+    outside. Only runs while no location is set yet, making it a permanent
+    no-op once resolved. Users whose activities are all indoor (treadmill,
+    pool) never get a match here, which is intentional: weather genuinely
+    doesn't matter to them, so location stays unset and the coach never
+    brings it up."""
     if user.latitude is not None:
         return
 
     for activity in activities:
+        location = _extract_location(activity)
+        if location is not None:
+            _apply_location(user, location)
+            return
+
         activity_id = activity.get("activityId")
         if activity_id is None:
             continue
@@ -133,15 +155,10 @@ async def _detect_location_from_activities(db: AsyncSession, user: User, client:
             logger.exception("get_activity failed for user=%s activity=%s", user.id, activity_id)
             continue
 
-        lat, lon = detail.get("startLatitude"), detail.get("startLongitude")
-        if lat is None or lon is None:
-            continue
-
-        user.latitude = lat
-        user.longitude = lon
-        user.location_name = detail.get("locationName") or None
-        user.timezone = _tf.timezone_at(lat=lat, lng=lon)
-        return
+        location = _extract_location(detail)
+        if location is not None:
+            _apply_location(user, location)
+            return
 
 
 def _activity_values(user: User, activity: dict[str, Any]) -> dict[str, Any] | None:
@@ -209,6 +226,11 @@ async def sync_recent_activities(db: AsyncSession, user: User, limit: int = 200)
     for activity in activities:
         await _upsert_activity(db, user, activity)
         count += 1
+
+    # activities here already carry startLatitude/startLongitude inline
+    # (unlike sync_day's per-day payload), so this never needs the extra
+    # get_activity() fallback call in practice.
+    await _detect_location_from_activities(db, user, client, activities)
 
     await db.commit()
     return count
