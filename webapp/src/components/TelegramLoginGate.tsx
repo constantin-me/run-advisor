@@ -36,8 +36,9 @@ export default function TelegramLoginGate() {
   }, []);
 
   return (
-    <div className="page">
-      <h1>Running Coach</h1>
+    <div className="welcome-screen">
+      <div className="welcome-mark">Coach</div>
+      <p className="welcome-tagline">Your running coach, trained on your own Garmin data.</p>
       <div className="card stack">
         <p style={{ margin: 0 }}>Log in with Telegram to continue.</p>
         <div ref={containerRef} />

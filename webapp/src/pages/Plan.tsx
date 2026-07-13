@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { IconCheck, IconWatch } from "../components/icons";
 import { apiFetch } from "../lib/api";
 
 type Workout = {
@@ -17,6 +18,12 @@ type Plan = {
   title: string;
   workouts: Workout[];
 };
+
+function formatWorkoutDate(iso: string): string {
+  const d = new Date(iso + "T00:00:00");
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+}
 
 export default function Plan() {
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -69,55 +76,48 @@ export default function Plan() {
 
   return (
     <div className="page">
-      <h1>Training Plan</h1>
+      <div className="page-header">
+        <div className="eyebrow">Your training</div>
+        <h1>Plan</h1>
+      </div>
 
       {!plan && <div className="card empty-state">No active plan yet. Ask your coach in Chat to build one.</div>}
 
       {plan && (
         <>
-          <h2>{plan.title}</h2>
-
-          <div className="row">
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 14 }}>
+            <h2 style={{ margin: 0 }}>{plan.title}</h2>
             <button className="btn btn-primary" onClick={syncToGarmin} disabled={busy}>
               Sync to Garmin
             </button>
           </div>
-          {syncStatus && <p className="status-info">{syncStatus}</p>}
+          {syncStatus && <p className="status-info" style={{ marginBottom: 14 }}>{syncStatus}</p>}
 
-          <div className="table-wrap" style={{ marginTop: 12 }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Type</th>
-                  <th>Description</th>
-                  <th>Distance</th>
-                  <th>Watch</th>
-                  <th>Done</th>
-                </tr>
-              </thead>
-              <tbody>
-                {plan.workouts.map((w) => (
-                  <tr key={w.id} style={w.done ? { opacity: 0.55, textDecoration: "line-through" } : undefined}>
-                    <td>{w.date}</td>
-                    <td>
-                      <span className="badge badge-neutral">{w.type}</span>
-                    </td>
-                    <td>{w.description ?? "-"}</td>
-                    <td>{w.distance_m ? `${(w.distance_m / 1000).toFixed(1)} km` : "-"}</td>
-                    <td>{w.synced_to_garmin ? <span className="badge badge-success">synced</span> : "-"}</td>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={w.done}
-                        onChange={() => toggleDone(w)}
-                        style={{ width: 18, height: 18 }}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="item-list">
+            {plan.workouts.map((w) => (
+              <div className={`workout-card${w.done ? " done" : ""}`} key={w.id}>
+                <button
+                  className={`workout-checkbox${w.done ? " checked" : ""}`}
+                  onClick={() => toggleDone(w)}
+                  aria-label={w.done ? "Mark as not done" : "Mark as done"}
+                >
+                  {w.done && <IconCheck />}
+                </button>
+                <div className="workout-main">
+                  <div className="workout-date">{formatWorkoutDate(w.date)}</div>
+                  <div className="workout-type">{w.type}</div>
+                  {w.description && <div className="workout-desc">{w.description}</div>}
+                </div>
+                <div className="workout-trail">
+                  {w.distance_m && <div>{(w.distance_m / 1000).toFixed(1)} km</div>}
+                  {w.synced_to_garmin && (
+                    <div className="row" style={{ justifyContent: "flex-end", gap: 4, marginTop: 3 }}>
+                      <IconWatch style={{ width: 13, height: 13 }} />
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
         </>
       )}

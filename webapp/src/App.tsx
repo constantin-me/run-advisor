@@ -34,18 +34,22 @@ function MainGate({ status }: { status: "loading" | SessionResult }) {
   if (status === "loading") return null;
   if (status === "needs-web-login") return <TelegramLoginGate />;
   if (status === "error") {
-    return <div style={{ padding: 16 }}>Could not start a session. Please reopen the app from Telegram.</div>;
+    return (
+      <div className="page">
+        <p className="status-error">Could not start a session. Please reopen the app from Telegram.</p>
+      </div>
+    );
   }
 
   return (
-    <>
-      <NavBar />
+    <div className="app-shell">
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/goals" element={<Goals />} />
         <Route path="/plan" element={<Plan />} />
       </Routes>
-    </>
+      <NavBar />
+    </div>
   );
 }

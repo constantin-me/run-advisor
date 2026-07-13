@@ -65,7 +65,15 @@ export default function Chat() {
 
   return (
     <div className="page">
-      <h1>Coach Chat</h1>
+      <div className="page-header row" style={{ justifyContent: "space-between", flexWrap: "nowrap" }}>
+        <div>
+          <div className="eyebrow">Your coach</div>
+          <h1>Chat</h1>
+        </div>
+        <button className="btn btn-ghost" onClick={newConversation} disabled={busy}>
+          New chat
+        </button>
+      </div>
 
       {messages.length > 0 ? (
         <div className="chat-thread">
@@ -77,10 +85,10 @@ export default function Chat() {
           <div ref={bottomRef} />
         </div>
       ) : (
-        <div className="card empty-state">No messages yet — say hello to your coach.</div>
+        <div className="card empty-state">Say hello to your coach — ask about training, recovery, or weather.</div>
       )}
 
-      <div className="card stack">
+      <div className="composer stack">
         <textarea
           className="textarea"
           placeholder="Ask your coach anything…"
@@ -92,14 +100,12 @@ export default function Chat() {
               send();
             }
           }}
-          rows={3}
+          rows={2}
+          style={{ border: "none", padding: "4px 2px" }}
         />
-        <div className="row">
+        <div className="row" style={{ justifyContent: "flex-end" }}>
           <button className="btn btn-primary" onClick={send} disabled={busy || !input.trim()}>
             Send
-          </button>
-          <button className="btn" onClick={newConversation} disabled={busy}>
-            New conversation
           </button>
         </div>
       </div>

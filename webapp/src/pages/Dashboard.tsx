@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import Sparkline from "../components/Sparkline";
+import { IconDownload, IconPulse, IconRefresh } from "../components/icons";
 import { apiFetch } from "../lib/api";
 
 type DailyMetric = {
@@ -23,6 +25,18 @@ type Activity = {
   avg_hr: number | null;
 };
 
+type MetricKey = keyof Omit<DailyMetric, "metric_date" | "sleep_duration_s">;
+
+const STAT_DEFS: { key: MetricKey; label: string; unit?: string }[] = [
+  { key: "hrv", label: "HRV", unit: "ms" },
+  { key: "resting_hr", label: "Resting HR", unit: "bpm" },
+  { key: "sleep_score", label: "Sleep" },
+  { key: "body_battery", label: "Body Battery" },
+  { key: "stress_avg", label: "Stress" },
+  { key: "vo2max", label: "VO2 Max" },
+  { key: "training_readiness", label: "Readiness" },
+];
+
 function formatPace(secPerKm: number | null): string {
   if (!secPerKm) return "-";
   const min = Math.floor(secPerKm / 60);
@@ -35,6 +49,13 @@ function formatDate(iso: string | null): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function greeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
 }
 
 export default function Dashboard() {
@@ -131,124 +152,144 @@ export default function Dashboard() {
     }
   }
 
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const weekActivities = activities.filter((a) => a.start_time && new Date(a.start_time).getTime() >= weekAgo);
+  const weekKm = weekActivities.reduce((sum, a) => sum + (a.distance_m ?? 0), 0) / 1000;
+  const lastActivity = activities[0];
+
   return (
     <div className="page">
-      <h1>Dashboard</h1>
-
       {linked === false && !mfaNeeded && (
-        <div className="card stack">
-          <p style={{ margin: 0 }}>Link your Garmin account to get started.</p>
-          <div className="field">
-            <label>Garmin email</label>
-            <input className="input" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <>
+          <div className="page-header">
+            <div className="eyebrow">Get started</div>
+            <h1>Link your Garmin</h1>
           </div>
-          <div className="field">
-            <label>Password</label>
-            <input
-              className="input"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
+          <div className="card stack">
+            <p style={{ margin: 0 }}>Connect your Garmin account so your coach can see your training data.</p>
+            <div className="field">
+              <label>Garmin email</label>
+              <input className="input" value={email} onChange={(e) => setEmail(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Password</label>
+              <input
+                className="input"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            <div className="row">
+              <button className="btn btn-primary" onClick={handleLink} disabled={busy}>
+                Link Garmin
+              </button>
+            </div>
+            {linkError && <p className="status-error">{linkError}</p>}
           </div>
-          <div className="row">
-            <button className="btn btn-primary" onClick={handleLink} disabled={busy}>
-              Link Garmin
-            </button>
-          </div>
-          {linkError && <p className="status-error">{linkError}</p>}
-        </div>
+        </>
       )}
 
       {mfaNeeded && (
-        <div className="card stack">
-          <p style={{ margin: 0 }}>Enter the MFA code sent to you by Garmin.</p>
-          <div className="field">
-            <label>Code</label>
-            <input className="input" placeholder="123456" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} />
+        <>
+          <div className="page-header">
+            <div className="eyebrow">One more step</div>
+            <h1>Verify your account</h1>
           </div>
-          <div className="row">
-            <button className="btn btn-primary" onClick={handleMfa} disabled={busy}>
-              Confirm
-            </button>
+          <div className="card stack">
+            <p style={{ margin: 0 }}>Enter the MFA code Garmin sent you.</p>
+            <div className="field">
+              <label>Code</label>
+              <input className="input" placeholder="123456" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} />
+            </div>
+            <div className="row">
+              <button className="btn btn-primary" onClick={handleMfa} disabled={busy}>
+                Confirm
+              </button>
+            </div>
+            {linkError && <p className="status-error">{linkError}</p>}
           </div>
-          {linkError && <p className="status-error">{linkError}</p>}
-        </div>
+        </>
       )}
 
       {linked && (
         <>
+          <div className="hero-card">
+            <div className="hero-eyebrow">{greeting()}</div>
+            <div className="hero-headline">{weekKm.toFixed(1)} km this week</div>
+            <p className="hero-sub">
+              {weekActivities.length > 0
+                ? `${weekActivities.length} run${weekActivities.length === 1 ? "" : "s"} · last on ${formatDate(lastActivity?.start_time ?? null)}`
+                : "No runs synced this week yet"}
+            </p>
+          </div>
+
           <div className="row">
-            <button className="btn" onClick={handleSync} disabled={busy}>
-              Sync now
+            <button className="btn btn-ghost" onClick={handleSync} disabled={busy}>
+              <span className="row" style={{ gap: 6 }}>
+                <IconRefresh style={{ width: 15, height: 15 }} />
+                Sync now
+              </span>
             </button>
-            <button className="btn" onClick={handleBackfill} disabled={busy}>
-              Backfill history
+            <button className="btn btn-ghost" onClick={handleBackfill} disabled={busy}>
+              <span className="row" style={{ gap: 6 }}>
+                <IconDownload style={{ width: 15, height: 15 }} />
+                Backfill history
+              </span>
             </button>
           </div>
           {backfillStatus && <p className="status-info">{backfillStatus}</p>}
 
-          <h2>Recent metrics</h2>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Sleep</th>
-                  <th>HRV</th>
-                  <th>RHR</th>
-                  <th>Stress</th>
-                  <th>Body Battery</th>
-                  <th>VO2max</th>
-                  <th>Readiness</th>
-                </tr>
-              </thead>
-              <tbody>
-                {metrics.map((m) => (
-                  <tr key={m.metric_date}>
-                    <td>{formatDate(m.metric_date)}</td>
-                    <td>{m.sleep_score ?? "-"}</td>
-                    <td>{m.hrv ?? "-"}</td>
-                    <td>{m.resting_hr ?? "-"}</td>
-                    <td>{m.stress_avg ?? "-"}</td>
-                    <td>{m.body_battery ?? "-"}</td>
-                    <td>{m.vo2max ?? "-"}</td>
-                    <td>{m.training_readiness ?? "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {metrics.length === 0 && <div className="empty-state">No metrics synced yet.</div>}
-          </div>
+          <h2>Health data</h2>
+          {metrics.length === 0 ? (
+            <div className="card empty-state">No metrics synced yet.</div>
+          ) : (
+            <div className="stat-grid">
+              {STAT_DEFS.filter((def) => metrics[0]?.[def.key] != null).map((def) => {
+                const latest = metrics[0][def.key] as number;
+                const spark = metrics
+                  .slice(0, 14)
+                  .map((m) => m[def.key] as number | null)
+                  .filter((v): v is number => v != null)
+                  .reverse();
+                return (
+                  <div className="stat-tile" key={def.key}>
+                    <div className="stat-label">{def.label}</div>
+                    <div className="stat-value-row">
+                      <span className="stat-value">{Math.round(latest)}</span>
+                      {def.unit && <span className="stat-unit">{def.unit}</span>}
+                    </div>
+                    {spark.length >= 2 && <Sparkline className="stat-sparkline" values={spark} />}
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
           <h2>Recent activities</h2>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>Type</th>
-                  <th>Distance</th>
-                  <th>Pace</th>
-                  <th>Avg HR</th>
-                </tr>
-              </thead>
-              <tbody>
-                {activities.map((a) => (
-                  <tr key={a.garmin_activity_id}>
-                    <td>{formatDate(a.start_time)}</td>
-                    <td>
-                      <span className="badge badge-neutral">{a.activity_type ?? "-"}</span>
-                    </td>
-                    <td>{a.distance_m ? `${(a.distance_m / 1000).toFixed(2)} km` : "-"}</td>
-                    <td>{formatPace(a.avg_pace_s_per_km)}</td>
-                    <td>{a.avg_hr ?? "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {activities.length === 0 && <div className="empty-state">No activities synced yet.</div>}
-          </div>
+          {activities.length === 0 ? (
+            <div className="card empty-state">No activities synced yet.</div>
+          ) : (
+            <div className="item-list">
+              {activities.slice(0, 15).map((a) => (
+                <div className="item-row" key={a.garmin_activity_id}>
+                  <div className="item-icon">
+                    <IconPulse />
+                  </div>
+                  <div className="item-main">
+                    <div className="item-title">{(a.activity_type ?? "activity").replace(/_/g, " ")}</div>
+                    <div className="item-meta">
+                      {formatDate(a.start_time)} · {formatPace(a.avg_pace_s_per_km)}
+                    </div>
+                  </div>
+                  <div className="item-trail">
+                    <div className="item-stat">{a.distance_m ? `${(a.distance_m / 1000).toFixed(2)} km` : "-"}</div>
+                    {a.avg_hr && <div className="item-substat">{a.avg_hr} bpm</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </>
       )}
     </div>

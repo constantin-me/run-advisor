@@ -7,6 +7,12 @@ type Goal = {
   target_date: string | null;
 };
 
+function formatTargetDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
 export default function Goals() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [text, setText] = useState("");
@@ -40,19 +46,25 @@ export default function Goals() {
 
   return (
     <div className="page">
-      <h1>Goals</h1>
+      <div className="page-header">
+        <div className="eyebrow">What you're chasing</div>
+        <h1>Goals</h1>
+      </div>
 
       {goals.length > 0 ? (
-        <ul className="plain">
+        <div className="item-list" style={{ marginBottom: 14 }}>
           {goals.map((g) => (
-            <li key={g.id}>
-              {g.text}
-              {g.target_date && <span className="status-info"> — by {g.target_date}</span>}
-            </li>
+            <div className="goal-card" key={g.id}>
+              <div className="goal-marker" />
+              <div>
+                <div className="goal-text">{g.text}</div>
+                {g.target_date && <div className="goal-date">By {formatTargetDate(g.target_date)}</div>}
+              </div>
+            </div>
           ))}
-        </ul>
+        </div>
       ) : (
-        <div className="card empty-state">No goals yet.</div>
+        <div className="card empty-state">No goals yet — add one below, or ask your coach to set one for you.</div>
       )}
 
       <h2>Add a goal</h2>
@@ -67,7 +79,7 @@ export default function Goals() {
         </div>
         <div className="row">
           <button className="btn btn-primary" onClick={addGoal} disabled={busy || !text.trim()}>
-            Add
+            Add goal
           </button>
         </div>
       </div>
