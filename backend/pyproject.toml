@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "pyjwt>=2.9",
     "markdown>=3.7",
+    "timezonefinder>=6.5",
 ]
 
 [tool.setuptools]

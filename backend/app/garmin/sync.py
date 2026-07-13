@@ -5,11 +5,16 @@ from typing import Any
 
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from timezonefinder import TimezoneFinder
 
 from app.db.models import Activity, DailyMetric, User
 from app.garmin.client import get_client
 
 logger = logging.getLogger(__name__)
+
+# Loads its coordinate-to-timezone shapefile data once at import time and
+# reuses it for every lookup — cheap after startup, expensive to recreate.
+_tf = TimezoneFinder()
 
 
 def _dig(d: Any, *path: str, default: Any = None) -> Any:
@@ -95,10 +100,48 @@ async def sync_day(db: AsyncSession, user: User, day: date) -> None:
         logger.exception("Garmin activities fetch failed for user=%s date=%s", user.id, cdate)
         activities_raw = None
 
-    for activity in _dig(activities_raw, "ActivitiesForDay", "payload", default=[]) or []:
+    activities = _dig(activities_raw, "ActivitiesForDay", "payload", default=[]) or []
+    for activity in activities:
         await _upsert_activity(db, user, activity)
 
+    await _detect_location_from_activities(db, user, client, activities)
+
     await db.commit()
+
+
+async def _detect_location_from_activities(db: AsyncSession, user: User, client: Any, activities: list[dict]) -> None:
+    """Auto-set the user's location from their own outdoor Garmin activities,
+    so weather-aware coaching works with zero setup for anyone who runs
+    outside. get_activities_fordate (used above) never includes GPS fields
+    regardless of activity type, so this makes one extra per-activity call
+    to get_activity() — but only while no location is set yet, making it a
+    permanent no-op once resolved. Users whose activities are all indoor
+    (treadmill, pool) never get a match here, which is intentional: weather
+    genuinely doesn't matter to them, so location stays unset and the coach
+    never brings it up."""
+    if user.latitude is not None:
+        return
+
+    for activity in activities:
+        activity_id = activity.get("activityId")
+        if activity_id is None:
+            continue
+
+        try:
+            detail = await asyncio.to_thread(client.get_activity, str(activity_id))
+        except Exception:
+            logger.exception("get_activity failed for user=%s activity=%s", user.id, activity_id)
+            continue
+
+        lat, lon = detail.get("startLatitude"), detail.get("startLongitude")
+        if lat is None or lon is None:
+            continue
+
+        user.latitude = lat
+        user.longitude = lon
+        user.location_name = detail.get("locationName") or None
+        user.timezone = _tf.timezone_at(lat=lat, lng=lon)
+        return
 
 
 def _activity_values(user: User, activity: dict[str, Any]) -> dict[str, Any] | None:

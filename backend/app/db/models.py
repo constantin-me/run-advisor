@@ -16,6 +16,10 @@ class User(Base):
     telegram_username: Mapped[str | None] = mapped_column(String)
     garmin_linked: Mapped[bool] = mapped_column(Boolean, default=False)
     garmin_token_dir: Mapped[str | None] = mapped_column(String)
+    latitude: Mapped[float | None] = mapped_column(Numeric)
+    longitude: Mapped[float | None] = mapped_column(Numeric)
+    location_name: Mapped[str | None] = mapped_column(String)
+    timezone: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     activities: Mapped[list["Activity"]] = relationship(back_populates="user", cascade="all, delete-orphan")

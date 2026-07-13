@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Activity, DailyMetric, Goal, PlanWorkout, TrainingPlan, User
+from app.weather.client import geocode, get_forecast
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -86,6 +87,29 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                 },
                 "required": ["title", "workouts"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_location",
+            "description": "Save the user's location (city) so weather-aware advice becomes available. Call this when the user mentions their city or when weather would be useful but no location is set yet.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string", "description": "City name, e.g. 'Bucharest' or 'Austin, Texas'"}},
+                "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather_forecast",
+            "description": "Get the weather forecast (daily outlook + morning/midday/evening windows for the next 2 days) for the user's saved location. Returns an error if no location is set yet — ask the user for their city and call set_location first.",
+            "parameters": {
+                "type": "object",
+                "properties": {"days": {"type": "integer", "description": "Number of days of daily outlook, default 3"}},
             },
         },
     },
@@ -231,6 +255,31 @@ async def save_training_plan(
     return {"id": plan.id, "title": title, "workout_count": len(workouts)}
 
 
+async def set_location(db: AsyncSession, user: User, city: str) -> dict:
+    resolved = await geocode(city)
+    if resolved is None:
+        return {"error": "not_found", "message": f"couldn't find a location matching {city!r}"}
+
+    user.latitude = resolved["latitude"]
+    user.longitude = resolved["longitude"]
+    user.location_name = f"{resolved['name']}, {resolved['country']}" if resolved.get("country") else resolved["name"]
+    user.timezone = resolved.get("timezone")
+    await db.commit()
+
+    return {"location_name": user.location_name}
+
+
+async def get_weather_forecast(db: AsyncSession, user: User, days: int = 3) -> dict:
+    if user.latitude is None or user.longitude is None:
+        return {"error": "no_location", "message": "ask the user for their city, then call set_location"}
+
+    forecast = await get_forecast(float(user.latitude), float(user.longitude), user.timezone or "UTC", days=days)
+    if forecast is None:
+        return {"error": "weather_unavailable"}
+
+    return {"location": user.location_name, **forecast}
+
+
 async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict) -> Any:
     from app.memory.client import recall_memories, store_memory as memory_store
 
@@ -248,6 +297,10 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
         return await save_training_plan(
             db, user, title=arguments["title"], workouts=arguments["workouts"], goal_id=arguments.get("goal_id")
         )
+    if name == "set_location":
+        return await set_location(db, user, city=arguments["city"])
+    if name == "get_weather_forecast":
+        return await get_weather_forecast(db, user, days=arguments.get("days", 3))
     if name == "search_memory":
         return await recall_memories(user.telegram_id, arguments["query"])
     if name == "store_memory":
