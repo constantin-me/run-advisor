@@ -1,6 +1,17 @@
 from datetime import date, datetime
 
-from sqlalchemy import JSON, BigInteger, Boolean, Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -20,14 +31,28 @@ class User(Base):
     longitude: Mapped[float | None] = mapped_column(Numeric)
     location_name: Mapped[str | None] = mapped_column(String)
     timezone: Mapped[str | None] = mapped_column(String)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
 
-    activities: Mapped[list["Activity"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    daily_metrics: Mapped[list["DailyMetric"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    goals: Mapped[list["Goal"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    training_plans: Mapped[list["TrainingPlan"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    chat_messages: Mapped[list["ChatMessage"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    memories: Mapped[list["Memory"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    activities: Mapped[list["Activity"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    daily_metrics: Mapped[list["DailyMetric"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    goals: Mapped[list["Goal"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    training_plans: Mapped[list["TrainingPlan"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    chat_messages: Mapped[list["ChatMessage"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    memories: Mapped[list["Memory"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Activity(Base):
@@ -45,6 +70,10 @@ class Activity(Base):
     avg_hr: Mapped[int | None] = mapped_column()
     max_hr: Mapped[int | None] = mapped_column()
     cadence: Mapped[float | None] = mapped_column(Numeric)
+    latitude: Mapped[float | None] = mapped_column(Numeric)
+    longitude: Mapped[float | None] = mapped_column(Numeric)
+    location_name: Mapped[str | None] = mapped_column(String)
+    location_checked: Mapped[bool] = mapped_column(Boolean, default=False)
     raw: Mapped[dict] = mapped_column(JSON, default=dict)
 
     user: Mapped["User"] = relationship(back_populates="activities")
@@ -78,7 +107,9 @@ class Goal(Base):
     text: Mapped[str] = mapped_column(Text)
     target_date: Mapped[date | None] = mapped_column(Date)
     status: Mapped[str] = mapped_column(String, default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
 
     user: Mapped["User"] = relationship(back_populates="goals")
 
@@ -91,10 +122,14 @@ class TrainingPlan(Base):
     goal_id: Mapped[int | None] = mapped_column(ForeignKey("goals.id"))
     title: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
 
     user: Mapped["User"] = relationship(back_populates="training_plans")
-    workouts: Mapped[list["PlanWorkout"]] = relationship(back_populates="plan", cascade="all, delete-orphan")
+    workouts: Mapped[list["PlanWorkout"]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan"
+    )
 
 
 class PlanWorkout(Base):
@@ -121,7 +156,9 @@ class ChatMessage(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     role: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
 
     user: Mapped["User"] = relationship(back_populates="chat_messages")
 
@@ -132,6 +169,8 @@ class Memory(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     content: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
 
     user: Mapped["User"] = relationship(back_populates="memories")

@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -15,7 +15,12 @@ TOOL_SCHEMAS: list[dict] = [
             "description": "Get the user's daily health metrics (sleep, HRV, resting HR, stress, body battery, VO2max, training readiness) for the last N days.",
             "parameters": {
                 "type": "object",
-                "properties": {"days": {"type": "integer", "description": "Number of days back, default 7"}},
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days back, default 7",
+                    }
+                },
             },
         },
     },
@@ -23,10 +28,15 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "get_recent_activities",
-            "description": "Get the user's N most recent Garmin activities (runs etc.) with pace, distance, HR.",
+            "description": "Get the user's N most recent Garmin activities (runs etc.) with pace, distance, HR, and location (city/place name — null for indoor activities like treadmill or pool).",
             "parameters": {
                 "type": "object",
-                "properties": {"n": {"type": "integer", "description": "Number of activities, default 5"}},
+                "properties": {
+                    "n": {
+                        "type": "integer",
+                        "description": "Number of activities, default 5",
+                    }
+                },
             },
         },
     },
@@ -46,8 +56,14 @@ TOOL_SCHEMAS: list[dict] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "Goal description, e.g. 'sub-50 10k'"},
-                    "target_date": {"type": "string", "description": "ISO date YYYY-MM-DD, optional"},
+                    "text": {
+                        "type": "string",
+                        "description": "Goal description, e.g. 'sub-50 10k'",
+                    },
+                    "target_date": {
+                        "type": "string",
+                        "description": "ISO date YYYY-MM-DD, optional",
+                    },
                 },
                 "required": ["text"],
             },
@@ -70,14 +86,23 @@ TOOL_SCHEMAS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string"},
-                    "goal_id": {"type": "integer", "description": "Optional goal id this plan targets"},
+                    "goal_id": {
+                        "type": "integer",
+                        "description": "Optional goal id this plan targets",
+                    },
                     "workouts": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "date": {"type": "string", "description": "ISO date YYYY-MM-DD"},
-                                "workout_type": {"type": "string", "description": "e.g. easy run, tempo, long run, rest"},
+                                "date": {
+                                    "type": "string",
+                                    "description": "ISO date YYYY-MM-DD",
+                                },
+                                "workout_type": {
+                                    "type": "string",
+                                    "description": "e.g. easy run, tempo, long run, rest",
+                                },
                                 "description": {"type": "string"},
                                 "distance_m": {"type": "number"},
                                 "pace_s_per_km": {"type": "number"},
@@ -97,7 +122,12 @@ TOOL_SCHEMAS: list[dict] = [
             "description": "Save the user's location (city) so weather-aware advice becomes available. Call this when the user mentions their city or when weather would be useful but no location is set yet.",
             "parameters": {
                 "type": "object",
-                "properties": {"city": {"type": "string", "description": "City name, e.g. 'Bucharest' or 'Austin, Texas'"}},
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "City name, e.g. 'Bucharest' or 'Austin, Texas'",
+                    }
+                },
                 "required": ["city"],
             },
         },
@@ -109,7 +139,12 @@ TOOL_SCHEMAS: list[dict] = [
             "description": "Get the weather forecast (daily outlook + morning/midday/evening windows for the next 2 days) for the user's saved location. Returns an error if no location is set yet — ask the user for their city and call set_location first.",
             "parameters": {
                 "type": "object",
-                "properties": {"days": {"type": "integer", "description": "Number of days of daily outlook, default 3"}},
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days of daily outlook, default 3",
+                    }
+                },
             },
         },
     },
@@ -144,7 +179,9 @@ def _metric_to_dict(m: DailyMetric) -> dict[str, Any]:
     return {
         "date": m.metric_date.isoformat(),
         "sleep_score": m.sleep_score,
-        "sleep_duration_s": float(m.sleep_duration_s) if m.sleep_duration_s is not None else None,
+        "sleep_duration_s": (
+            float(m.sleep_duration_s) if m.sleep_duration_s is not None else None
+        ),
         "hrv": float(m.hrv) if m.hrv is not None else None,
         "resting_hr": m.resting_hr,
         "stress_avg": m.stress_avg,
@@ -160,8 +197,12 @@ def _activity_to_dict(a: Activity) -> dict[str, Any]:
         "type": a.activity_type,
         "distance_m": float(a.distance_m) if a.distance_m is not None else None,
         "duration_s": float(a.duration_s) if a.duration_s is not None else None,
-        "avg_pace_s_per_km": float(a.avg_pace_s_per_km) if a.avg_pace_s_per_km is not None else None,
+        "avg_pace_s_per_km": (
+            float(a.avg_pace_s_per_km) if a.avg_pace_s_per_km is not None else None
+        ),
         "avg_hr": a.avg_hr,
+        # None for indoor activities (treadmill, pool) — no GPS to report.
+        "location": a.location_name,
     }
 
 
@@ -177,20 +218,31 @@ async def get_daily_metrics(db: AsyncSession, user: User, days: int = 7) -> list
 
 async def get_recent_activities(db: AsyncSession, user: User, n: int = 5) -> list[dict]:
     result = await db.execute(
-        select(Activity).where(Activity.user_id == user.id).order_by(Activity.start_time.desc()).limit(n)
+        select(Activity)
+        .where(Activity.user_id == user.id)
+        .order_by(Activity.start_time.desc())
+        .limit(n)
     )
     return [_activity_to_dict(a) for a in result.scalars().all()]
 
 
 async def get_goals(db: AsyncSession, user: User) -> list[dict]:
-    result = await db.execute(select(Goal).where(Goal.user_id == user.id, Goal.status == "active"))
+    result = await db.execute(
+        select(Goal).where(Goal.user_id == user.id, Goal.status == "active")
+    )
     return [
-        {"id": g.id, "text": g.text, "target_date": g.target_date.isoformat() if g.target_date else None}
+        {
+            "id": g.id,
+            "text": g.text,
+            "target_date": g.target_date.isoformat() if g.target_date else None,
+        }
         for g in result.scalars().all()
     ]
 
 
-async def save_goal(db: AsyncSession, user: User, text: str, target_date: str | None = None) -> dict:
+async def save_goal(
+    db: AsyncSession, user: User, text: str, target_date: str | None = None
+) -> dict:
     parsed_date = date.fromisoformat(target_date) if target_date else None
     goal = Goal(user_id=user.id, text=text, target_date=parsed_date)
     db.add(goal)
@@ -210,15 +262,23 @@ async def get_training_plan(db: AsyncSession, user: User) -> dict | None:
         return None
 
     wk_result = await db.execute(
-        select(PlanWorkout).where(PlanWorkout.plan_id == plan.id).order_by(PlanWorkout.scheduled_date)
+        select(PlanWorkout)
+        .where(PlanWorkout.plan_id == plan.id)
+        .order_by(PlanWorkout.scheduled_date)
     )
     workouts = [
         {
             "date": w.scheduled_date.isoformat(),
             "type": w.workout_type,
             "description": w.description,
-            "distance_m": float(w.target_distance_m) if w.target_distance_m is not None else None,
-            "pace_s_per_km": float(w.target_pace_s_per_km) if w.target_pace_s_per_km is not None else None,
+            "distance_m": (
+                float(w.target_distance_m) if w.target_distance_m is not None else None
+            ),
+            "pace_s_per_km": (
+                float(w.target_pace_s_per_km)
+                if w.target_pace_s_per_km is not None
+                else None
+            ),
             "done": w.done,
         }
         for w in wk_result.scalars().all()
@@ -227,10 +287,16 @@ async def get_training_plan(db: AsyncSession, user: User) -> dict | None:
 
 
 async def save_training_plan(
-    db: AsyncSession, user: User, title: str, workouts: list[dict], goal_id: int | None = None
+    db: AsyncSession,
+    user: User,
+    title: str,
+    workouts: list[dict],
+    goal_id: int | None = None,
 ) -> dict:
     old_plans = await db.execute(
-        select(TrainingPlan).where(TrainingPlan.user_id == user.id, TrainingPlan.status == "active")
+        select(TrainingPlan).where(
+            TrainingPlan.user_id == user.id, TrainingPlan.status == "active"
+        )
     )
     for old in old_plans.scalars().all():
         old.status = "superseded"
@@ -258,11 +324,18 @@ async def save_training_plan(
 async def set_location(db: AsyncSession, user: User, city: str) -> dict:
     resolved = await geocode(city)
     if resolved is None:
-        return {"error": "not_found", "message": f"couldn't find a location matching {city!r}"}
+        return {
+            "error": "not_found",
+            "message": f"couldn't find a location matching {city!r}",
+        }
 
     user.latitude = resolved["latitude"]
     user.longitude = resolved["longitude"]
-    user.location_name = f"{resolved['name']}, {resolved['country']}" if resolved.get("country") else resolved["name"]
+    user.location_name = (
+        f"{resolved['name']}, {resolved['country']}"
+        if resolved.get("country")
+        else resolved["name"]
+    )
     user.timezone = resolved.get("timezone")
     await db.commit()
 
@@ -271,9 +344,14 @@ async def set_location(db: AsyncSession, user: User, city: str) -> dict:
 
 async def get_weather_forecast(db: AsyncSession, user: User, days: int = 3) -> dict:
     if user.latitude is None or user.longitude is None:
-        return {"error": "no_location", "message": "ask the user for their city, then call set_location"}
+        return {
+            "error": "no_location",
+            "message": "ask the user for their city, then call set_location",
+        }
 
-    forecast = await get_forecast(float(user.latitude), float(user.longitude), user.timezone or "UTC", days=days)
+    forecast = await get_forecast(
+        float(user.latitude), float(user.longitude), user.timezone or "UTC", days=days
+    )
     if forecast is None:
         return {"error": "weather_unavailable"}
 
@@ -290,12 +368,18 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
     if name == "get_goals":
         return await get_goals(db, user)
     if name == "save_goal":
-        return await save_goal(db, user, text=arguments["text"], target_date=arguments.get("target_date"))
+        return await save_goal(
+            db, user, text=arguments["text"], target_date=arguments.get("target_date")
+        )
     if name == "get_training_plan":
         return await get_training_plan(db, user)
     if name == "save_training_plan":
         return await save_training_plan(
-            db, user, title=arguments["title"], workouts=arguments["workouts"], goal_id=arguments.get("goal_id")
+            db,
+            user,
+            title=arguments["title"],
+            workouts=arguments["workouts"],
+            goal_id=arguments.get("goal_id"),
         )
     if name == "set_location":
         return await set_location(db, user, city=arguments["city"])
