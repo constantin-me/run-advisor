@@ -30,6 +30,8 @@ BOT_COMMANDS = [
     ("help", "What this bot does and how to get started"),
     ("sync", "Sync your latest Garmin runs"),
     ("lastworkout", "Analyze your most recent workout"),
+    ("weather", "Check the forecast for your saved location"),
+    ("location", "Set or check your location for weather"),
 ]
 
 HELP_TEXT = (
@@ -174,6 +176,58 @@ async def last_workout_command(message: Message) -> None:
     await _stream_agent_reply(
         message.chat.id, stream_reply(telegram_id=message.from_user.id, text=LAST_WORKOUT_PROMPT)
     )
+
+
+@dp.message(Command("location"))
+async def location_command(message: Message) -> None:
+    from app.coach.tools import set_location
+
+    city = (message.text or "").partition(" ")[2].strip()
+    user = await _get_user_by_telegram_id(message.from_user.id)
+
+    if not city:
+        if user and user.location_name:
+            await message.answer(f"Your location is set to {user.location_name}. Send /location <city> to change it.")
+        else:
+            await message.answer("No location set yet. Send /location <city>, e.g. /location Bucharest.")
+        return
+
+    async with async_session() as db:
+        if user is None:
+            user = User(telegram_id=message.from_user.id)
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        else:
+            user = await db.get(User, user.id)
+        result = await set_location(db, user, city)
+
+    if "error" in result:
+        await message.answer(f'Couldn\'t find a location matching "{city}". Try a different spelling or a nearby larger city.')
+        return
+
+    await message.answer(f"Location set to {result['location_name']}.")
+
+
+@dp.message(Command("weather"))
+async def weather_command(message: Message) -> None:
+    from app.coach.agent import _format_weather
+    from app.coach.tools import get_weather_forecast
+
+    user = await _get_user_by_telegram_id(message.from_user.id)
+    if user is None or user.latitude is None:
+        await message.answer("No location set yet. Send /location <city> first, e.g. /location Bucharest.")
+        return
+
+    async with async_session() as db:
+        db_user = await db.get(User, user.id)
+        forecast = await get_weather_forecast(db, db_user, days=3)
+
+    if "error" in forecast:
+        await message.answer("Couldn't fetch the weather right now — try again in a bit.")
+        return
+
+    await _send_html(message.chat.id, f"Weather for {forecast['location']}:\n\n" + _format_weather(forecast))
 
 
 @dp.message(F.text)

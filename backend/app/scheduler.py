@@ -10,6 +10,7 @@ from app.config import settings
 from app.db.models import User
 from app.db.session import async_session
 from app.garmin.sync import sync_day
+from app.weather.client import get_forecast
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,26 @@ async def run_user_progress(user_id: int, day: date) -> None:
             "(2-4 sentence) progress update for them, phrased for a push notification, not a "
             "conversation. If something in the data is worth remembering long-term, call store_memory."
         )
+
+        # get_forecast never raises (it swallows and logs failures), so this
+        # is safe to call unconditionally when a location is set. Uses the
+        # user's own timezone (from geocoding) so "upcoming" is their local
+        # next day, not UTC's — the job itself fires at UTC midnight.
+        if user.latitude is not None and user.longitude is not None:
+            forecast = await get_forecast(
+                float(user.latitude), float(user.longitude), user.timezone or "UTC", days=2
+            )
+            if forecast and forecast.get("daily"):
+                upcoming = forecast["daily"][0]
+                instruction += (
+                    f"\n\nUpcoming weather ({upcoming['date']}, local time): "
+                    f"{upcoming['temp_min']:.0f}-{upcoming['temp_max']:.0f}°C "
+                    f"(feels like up to {upcoming['feels_like_max']:.0f}°C), "
+                    f"{upcoming['precipitation_probability']}% rain, {upcoming['condition']}. "
+                    "If conditions are extreme (heat, storms, cold), factor that into the update — "
+                    "e.g. suggest an earlier start time or an easier effort."
+                )
+
         summary = await generate_progress_summary(db, user, instruction)
 
     if summary:

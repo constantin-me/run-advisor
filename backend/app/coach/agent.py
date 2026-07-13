@@ -1,13 +1,21 @@
 import json
 import logging
 from collections.abc import AsyncGenerator
+from datetime import datetime
 
 from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.coach.prompts import SYSTEM_PROMPT
-from app.coach.tools import TOOL_SCHEMAS, execute_tool, get_daily_metrics, get_goals, get_training_plan
+from app.coach.tools import (
+    TOOL_SCHEMAS,
+    execute_tool,
+    get_daily_metrics,
+    get_goals,
+    get_training_plan,
+    get_weather_forecast,
+)
 from app.config import settings
 from app.db.models import ChatMessage, User
 from app.db.session import async_session
@@ -45,6 +53,25 @@ def _format_metrics(metrics: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_weather(forecast: dict) -> str:
+    windows_by_date = forecast.get("windows", {})
+    lines = []
+    for day in forecast["daily"][:2]:
+        label = datetime.strptime(day["date"], "%Y-%m-%d").strftime("%d %b")
+        line = (
+            f"{label}: {day['temp_min']:.0f}-{day['temp_max']:.0f}°C "
+            f"(feels like up to {day['feels_like_max']:.0f}°C), "
+            f"{day['precipitation_probability']}% rain, wind {day['wind_speed_max']:.0f}km/h ({day['condition']})"
+        )
+        window = windows_by_date.get(day["date"])
+        if window:
+            parts = [f"{name} {window[name]['temp']:.0f}°C" for name in ("morning", "midday", "evening") if name in window]
+            if parts:
+                line += "; " + " / ".join(parts)
+        lines.append(line)
+    return "\n".join(lines)
+
+
 async def _build_system_prompt(db: AsyncSession, user: User) -> str:
     """Always-on context so the coach can answer grounded questions (e.g.
     "what do you know about me?") without depending on the model deciding
@@ -73,6 +100,16 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
         system_prompt += f"\n\nActive training plan: \"{plan['title']}\" ({len(plan['workouts'])} scheduled workouts)."
     else:
         system_prompt += "\n\nNo active training plan."
+
+    if user.latitude is not None:
+        try:
+            forecast = await get_weather_forecast(db, user, days=2)
+            if "error" not in forecast:
+                system_prompt += "\n\nWeather forecast (next 2 days, local time):\n" + _format_weather(forecast)
+        except Exception:
+            # Weather is a nice-to-have, not load-bearing — never let a
+            # forecast fetch problem break the whole chat turn.
+            logger.exception("Weather forecast fetch failed for user_id=%s", user.id)
 
     return system_prompt
 
