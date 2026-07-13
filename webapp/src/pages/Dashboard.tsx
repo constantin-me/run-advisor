@@ -247,10 +247,10 @@ export default function Dashboard() {
             <div className="stat-grid">
               {STAT_DEFS.filter((def) => metrics[0]?.[def.key] != null).map((def) => {
                 const latest = metrics[0][def.key] as number;
-                const spark = metrics
+                const sparkPairs = metrics
                   .slice(0, 14)
-                  .map((m) => m[def.key] as number | null)
-                  .filter((v): v is number => v != null)
+                  .map((m) => ({ value: m[def.key] as number | null, date: m.metric_date }))
+                  .filter((p): p is { value: number; date: string } => p.value != null)
                   .reverse();
                 return (
                   <div className="stat-tile" key={def.key}>
@@ -259,7 +259,14 @@ export default function Dashboard() {
                       <span className="stat-value">{Math.round(latest)}</span>
                       {def.unit && <span className="stat-unit">{def.unit}</span>}
                     </div>
-                    {spark.length >= 2 && <Sparkline className="stat-sparkline" values={spark} />}
+                    {sparkPairs.length >= 2 && (
+                      <Sparkline
+                        className="stat-sparkline"
+                        values={sparkPairs.map((p) => p.value)}
+                        dates={sparkPairs.map((p) => formatDate(p.date))}
+                        unit={def.unit}
+                      />
+                    )}
                   </div>
                 );
               })}

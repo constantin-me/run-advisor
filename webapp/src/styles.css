@@ -233,12 +233,37 @@ p {
   font-size: 0.78rem;
   color: var(--color-text-muted);
 }
+.sparkline-wrap {
+  position: relative;
+  margin-top: 10px;
+}
 .stat-sparkline {
   display: block;
-  margin-top: 8px;
   width: 100%;
   height: 26px;
   color: var(--color-accent);
+  cursor: pointer;
+  touch-action: pan-y;
+}
+.sparkline-tooltip {
+  position: absolute;
+  bottom: 100%;
+  transform: translateX(-50%);
+  margin-bottom: 5px;
+  background: var(--color-text);
+  color: var(--color-bg-elevated);
+  font-size: 0.66rem;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 7px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: var(--shadow-card);
+  z-index: 5;
+}
+.sparkline-tooltip-date {
+  font-weight: 500;
+  opacity: 0.75;
 }
 
 /* Nav */
