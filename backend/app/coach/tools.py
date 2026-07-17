@@ -102,7 +102,11 @@ TOOL_SCHEMAS: list[dict] = [
                                 },
                                 "workout_type": {
                                     "type": "string",
-                                    "description": "e.g. easy run, tempo, long run, rest",
+                                    "description": (
+                                        "e.g. easy run, recovery, long run, tempo, threshold, "
+                                        "intervals, rest. This drives the heart-rate zone target "
+                                        "pushed to the watch, so use a clear, conventional name."
+                                    ),
                                 },
                                 "description": {"type": "string"},
                                 "distance_m": {"type": "number"},

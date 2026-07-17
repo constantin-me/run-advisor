@@ -20,12 +20,42 @@ logger = logging.getLogger(__name__)
 
 REST_KEYWORDS = ("rest", "off")
 
+# Map a workout type to a Garmin heart-rate zone (1-5). The zone is the
+# intensity *target* the watch shows during the run — the actually useful
+# metadata, versus a bare distance with no effort guidance. Ordered
+# most-specific-first: the first keyword found in the (lowercased) type wins.
+# Zones reference the athlete's own HR zones configured in Garmin, so "zone 2"
+# means their zone 2, not a hardcoded bpm range.
+_ZONE_KEYWORDS: tuple[tuple[int, tuple[str, ...]], ...] = (
+    # Unambiguous max-effort words first, so e.g. "VO2 intervals" resolves to
+    # Z5 by "vo2" ...
+    (5, ("vo2", "v02", "sprint", "speed", "track", "400", "800")),
+    # ... but the threshold family is checked before the generic "interval"
+    # structure word, so "threshold intervals" correctly resolves to Z4.
+    (4, ("tempo", "threshold", "lactate", "cruise", "fartlek")),
+    (5, ("interval", "repetition", "rep", "hill")),
+    (3, ("steady", "moderate", "marathon", "progression")),
+    (2, ("easy", "recovery", "long", "base", "aerobic", "jog", "warm", "cool")),
+)
+
+# General aerobic default for an unrecognized type — errs easy so a bad guess
+# never pushes someone into a hard session unprompted.
+_DEFAULT_ZONE = 2
+
 
 def is_rest_day(workout_type: str) -> bool:
     return any(kw in workout_type.lower() for kw in REST_KEYWORDS)
 
 
-def _build_step(distance_m: float | None, pace_s_per_km: float | None) -> ExecutableStep:
+def hr_zone_for(workout_type: str) -> int:
+    lowered = workout_type.lower()
+    for zone, keywords in _ZONE_KEYWORDS:
+        if any(kw in lowered for kw in keywords):
+            return zone
+    return _DEFAULT_ZONE
+
+
+def _build_step(workout_type: str, distance_m: float | None) -> ExecutableStep:
     if distance_m:
         end_condition = {
             "conditionTypeId": ConditionType.DISTANCE,
@@ -45,24 +75,15 @@ def _build_step(distance_m: float | None, pace_s_per_km: float | None) -> Execut
         }
         end_value = 1800.0
 
-    extra: dict = {}
-    if pace_s_per_km:
-        speed = 1000.0 / float(pace_s_per_km)
-        target_type = {
-            "workoutTargetTypeId": TargetType.PACE_ZONE,
-            "workoutTargetTypeKey": "pace.zone",
-            "displayOrder": 6,
-        }
-        # +/-5% tolerance band around the target pace, expressed as speed (m/s)
-        # per Garmin's pace-zone target convention.
-        extra["targetValueOne"] = speed * 0.95
-        extra["targetValueTwo"] = speed * 1.05
-    else:
-        target_type = {
-            "workoutTargetTypeId": TargetType.NO_TARGET,
-            "workoutTargetTypeKey": "no.target",
-            "displayOrder": 1,
-        }
+    # Intensity target is a heart-rate zone derived from the run type. HR is
+    # the honest governor for running (pace drifts with terrain, heat, and
+    # fatigue), so this is what the watch should coach against — not distance.
+    zone = hr_zone_for(workout_type)
+    target_type = {
+        "workoutTargetTypeId": TargetType.HEART_RATE_ZONE,
+        "workoutTargetTypeKey": "heart.rate.zone",
+        "displayOrder": 4,
+    }
 
     return ExecutableStep(
         stepOrder=1,
@@ -70,14 +91,16 @@ def _build_step(distance_m: float | None, pace_s_per_km: float | None) -> Execut
         endCondition=end_condition,
         endConditionValue=end_value,
         targetType=target_type,
-        **extra,
+        zoneNumber=zone,
     )
 
 
 def build_running_workout(workout_type: str, description: str | None, distance_m, pace_s_per_km) -> RunningWorkout:
     distance = float(distance_m) if distance_m is not None else None
     pace = float(pace_s_per_km) if pace_s_per_km is not None else None
-    step = _build_step(distance, pace)
+    # Pace no longer drives the step target (heart-rate zone does), but it's
+    # still the best estimate we have for the workout's expected duration.
+    step = _build_step(workout_type, distance)
 
     if distance and pace:
         duration_s = int(distance / (1000.0 / pace))
