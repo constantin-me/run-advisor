@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.dialects.postgresql import insert
@@ -11,6 +11,11 @@ from app.db.models import Activity, DailyMetric, User
 from app.garmin.client import get_client
 
 logger = logging.getLogger(__name__)
+
+# How stale synced data may be before an interactive chat request triggers an
+# on-demand refresh. Keeps replies grounded in near-current data without
+# hammering Garmin on every message.
+STALE_AFTER = timedelta(hours=2)
 
 # Loads its coordinate-to-timezone shapefile data once at import time and
 # reuses it for every lookup — cheap after startup, expensive to recreate.
@@ -117,6 +122,7 @@ async def sync_day(db: AsyncSession, user: User, day: date) -> None:
         await _ensure_activity_location(db, client, row)
         _maybe_bootstrap_user_location(user, row)
 
+    user.last_synced_at = datetime.now(timezone.utc)
     await db.commit()
 
 
@@ -286,5 +292,30 @@ async def sync_recent_activities(db: AsyncSession, user: User, limit: int = 200)
         await _ensure_activity_location(db, client, row)
         _maybe_bootstrap_user_location(user, row)
 
+    user.last_synced_at = datetime.now(timezone.utc)
     await db.commit()
     return count
+
+
+async def refresh_if_stale(db: AsyncSession, user: User) -> bool:
+    """Refresh today's Garmin data before an interactive reply if the last
+    sync is older than STALE_AFTER (or never happened). Returns True if a
+    sync ran. A Garmin/network failure is swallowed and logged — a stale
+    reply is far better than no reply, so this never blocks the chat."""
+    if not user.garmin_linked:
+        return False
+
+    last = user.last_synced_at
+    if last is not None:
+        # Column is timezone-aware, but guard against a naive value just in case.
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - last < STALE_AFTER:
+            return False
+
+    try:
+        await sync_day(db, user, date.today())
+        return True
+    except Exception:
+        logger.exception("On-demand refresh failed for user=%s", user.id)
+        return False

@@ -20,6 +20,7 @@ from app.coach.tools import (
 from app.config import settings
 from app.db.models import ChatMessage, User
 from app.db.session import async_session
+from app.garmin.sync import refresh_if_stale
 from app.memory.client import list_recent_memories
 
 logger = logging.getLogger(__name__)
@@ -251,6 +252,11 @@ async def stream_chat(
 ) -> AsyncGenerator[str, None]:
     db.add(ChatMessage(user_id=user.id, role="user", content=user_message))
     await db.commit()
+
+    # Ground the reply in near-current data: if the last Garmin sync is older
+    # than the staleness window, refresh today's data first. Self-throttling
+    # (once per window) and failure-safe (a Garmin outage never blocks chat).
+    await refresh_if_stale(db, user)
 
     final_text = ""
     try:

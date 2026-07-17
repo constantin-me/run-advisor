@@ -31,6 +31,7 @@ class User(Base):
     longitude: Mapped[float | None] = mapped_column(Numeric)
     location_name: Mapped[str | None] = mapped_column(String)
     timezone: Mapped[str | None] = mapped_column(String)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )
