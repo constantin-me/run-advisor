@@ -1,6 +1,5 @@
 import time
 from collections.abc import AsyncIterator
-from datetime import date, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
@@ -28,8 +27,6 @@ EDIT_INTERVAL_SECONDS = 1.0
 
 BOT_COMMANDS = [
     ("help", "What this bot does and how to get started"),
-    ("sync", "Sync your latest Garmin runs"),
-    ("lastworkout", "Analyze your most recent workout"),
     ("weather", "Check the forecast for your saved location"),
     ("location", "Set or check your location for weather"),
     ("recovery", "Check your current recovery status"),
@@ -39,15 +36,13 @@ HELP_TEXT = (
     "I'm your running coach. I read your Garmin training data and help you plan, "
     "train, and improve.\n\n"
     "First time? Run /start, then tap **Open Coach** to link your Garmin account. "
-    "Everything else — chat, /sync, /lastworkout — needs that link first.\n\n"
+    "Your history syncs automatically once linked, and stays fresh on its own.\n\n"
     "Commands:\n"
-    "/sync — pull your latest runs from Garmin\n"
-    "/lastworkout — get an analysis of your most recent workout\n"
     "/recovery — check your current recovery status\n"
+    "/weather — forecast for your location\n"
+    "/location — set or check your location\n"
     "Or just message me anything about your training."
 )
-
-LAST_WORKOUT_PROMPT = "Give me a detailed analysis of my most recent workout."
 
 _NOT_LINKED_TEXT = (
     "Garmin isn't linked yet. Run /start, then tap Open Coach to link your account."
@@ -157,40 +152,6 @@ async def help_command(message: Message) -> None:
     await _send_html(message.chat.id, HELP_TEXT)
 
 
-@dp.message(Command("sync"))
-async def sync_command(message: Message) -> None:
-    from app.garmin.sync import sync_day
-
-    user = await _get_user_by_telegram_id(message.from_user.id)
-    if user is None or not user.garmin_linked:
-        await message.answer(_NOT_LINKED_TEXT)
-        return
-
-    await message.answer("Syncing your latest runs…")
-    async with async_session() as db:
-        db_user = await db.get(User, user.id)
-        today = date.today()
-        for d in (today, today - timedelta(days=1)):
-            await sync_day(db, db_user, d)
-
-    await message.answer("Sync complete.")
-
-
-@dp.message(Command("lastworkout"))
-async def last_workout_command(message: Message) -> None:
-    from app.coach.agent import stream_reply
-
-    user = await _get_user_by_telegram_id(message.from_user.id)
-    if user is None or not user.garmin_linked:
-        await message.answer(_NOT_LINKED_TEXT)
-        return
-
-    await _stream_agent_reply(
-        message.chat.id,
-        stream_reply(telegram_id=message.from_user.id, text=LAST_WORKOUT_PROMPT),
-    )
-
-
 @dp.message(Command("location"))
 async def location_command(message: Message) -> None:
     from app.coach.tools import set_location
@@ -271,7 +232,7 @@ async def recovery_command(message: Message) -> None:
 
     if status is None:
         await message.answer(
-            "Not enough recent data to check recovery yet — try /sync first."
+            "Not enough recent data to check recovery yet — it'll fill in as your Garmin data syncs."
         )
         return
 

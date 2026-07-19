@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Sparkline from "../components/Sparkline";
-import { IconDownload, IconPulse, IconRefresh } from "../components/icons";
+import { IconPulse, IconRefresh } from "../components/icons";
 import { apiFetch } from "../lib/api";
 
 type DailyMetric = {
@@ -69,7 +69,6 @@ export default function Dashboard() {
 
   const [metrics, setMetrics] = useState<DailyMetric[]>([]);
   const [activities, setActivities] = useState<Activity[]>([]);
-  const [backfillStatus, setBackfillStatus] = useState("");
 
   async function loadData() {
     const statusRes = await apiFetch("/garmin/status");
@@ -127,25 +126,6 @@ export default function Dashboard() {
     setBusy(true);
     try {
       await apiFetch("/garmin/sync", { method: "POST" });
-      await loadData();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleBackfill() {
-    setBusy(true);
-    setBackfillStatus("Backfilling history, this can take a minute…");
-    try {
-      const res = await apiFetch("/garmin/backfill", { method: "POST", body: JSON.stringify({ days: 30 }) });
-      const data = await res.json();
-      if (!res.ok) {
-        setBackfillStatus(data.detail ?? "Backfill failed");
-        return;
-      }
-      setBackfillStatus(
-        `Done: ${data.activities_synced} activities, ${data.metrics_days_synced} days of metrics.`
-      );
       await loadData();
     } finally {
       setBusy(false);
@@ -231,14 +211,7 @@ export default function Dashboard() {
                 Sync now
               </span>
             </button>
-            <button className="btn btn-ghost" onClick={handleBackfill} disabled={busy}>
-              <span className="row" style={{ gap: 6 }}>
-                <IconDownload style={{ width: 15, height: 15 }} />
-                Backfill history
-              </span>
-            </button>
           </div>
-          {backfillStatus && <p className="status-info">{backfillStatus}</p>}
 
           <h2>Health data</h2>
           {metrics.length === 0 ? (

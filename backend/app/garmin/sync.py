@@ -297,6 +297,21 @@ async def sync_recent_activities(db: AsyncSession, user: User, limit: int = 200)
     return count
 
 
+async def backfill_history(db: AsyncSession, user: User, days: int = 30) -> tuple[int, int]:
+    """Pull as much history as practical in one pass: up to 200 recent
+    activities in one bulk call, plus daily metrics for the last `days` days.
+    Returns (activities_synced, metrics_days_synced). Runs automatically right
+    after a user links Garmin."""
+    days = max(1, min(days, 365))
+    activities_synced = await sync_recent_activities(db, user, limit=200)
+
+    today = date.today()
+    for i in range(days):
+        await sync_day(db, user, today - timedelta(days=i))
+
+    return activities_synced, days
+
+
 async def refresh_if_stale(db: AsyncSession, user: User) -> bool:
     """Refresh today's Garmin data before an interactive reply if the last
     sync is older than STALE_AFTER (or never happened). Returns True if a

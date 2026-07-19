@@ -1,16 +1,25 @@
+import asyncio
+import logging
 from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.db.models import User
-from app.db.session import get_db
+from app.db.session import async_session, get_db
 from app.garmin.client import start_login, submit_mfa, token_dir_for
-from app.garmin.sync import sync_day, sync_recent_activities
+from app.garmin.sync import backfill_history, sync_day
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/garmin")
+
+# Fire-and-forget background tasks need a strong reference or the event loop
+# may garbage-collect them mid-run.
+_background_tasks: set[asyncio.Task] = set()
 
 
 class LinkRequest(BaseModel):
@@ -24,6 +33,27 @@ class MfaRequest(BaseModel):
 
 class LinkStatus(BaseModel):
     status: str  # "linked" | "mfa_required"
+
+
+async def _backfill_after_link(telegram_id: int) -> None:
+    """Pull the user's Garmin history right after they link, in the background
+    so the link request returns immediately instead of blocking for the
+    minute-plus a full backfill takes."""
+    async with async_session() as db:
+        result = await db.execute(select(User).where(User.telegram_id == telegram_id))
+        user = result.scalar_one_or_none()
+        if user is None or not user.garmin_linked:
+            return
+        try:
+            await backfill_history(db, user)
+        except Exception:
+            logger.exception("Auto-backfill after link failed for telegram_id=%s", telegram_id)
+
+
+def _start_backfill(telegram_id: int) -> None:
+    task = asyncio.create_task(_backfill_after_link(telegram_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 @router.get("/status", response_model=LinkStatus)
@@ -46,6 +76,7 @@ async def link(
         user.garmin_linked = True
         user.garmin_token_dir = token_dir_for(user.telegram_id)
         await db.commit()
+        _start_backfill(user.telegram_id)
 
     return LinkStatus(status=outcome.status)
 
@@ -66,6 +97,7 @@ async def mfa(
     user.garmin_linked = True
     user.garmin_token_dir = token_dir_for(user.telegram_id)
     await db.commit()
+    _start_backfill(user.telegram_id)
     return LinkStatus(status=outcome.status)
 
 
@@ -82,37 +114,3 @@ async def sync(
         await sync_day(db, user, d)
 
     return {"status": "ok"}
-
-
-class BackfillRequest(BaseModel):
-    days: int = 30
-
-
-class BackfillResult(BaseModel):
-    status: str
-    activities_synced: int
-    metrics_days_synced: int
-
-
-@router.post("/backfill", response_model=BackfillResult)
-async def backfill(
-    body: BackfillRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> BackfillResult:
-    """Pulls as much history as practical in one go: up to 200 recent
-    activities in a single bulk call, plus daily metrics for the last
-    `days` days (capped at a year — each day is its own set of Garmin
-    calls, so this is much slower than /sync)."""
-    if not user.garmin_linked:
-        raise HTTPException(status_code=400, detail="Garmin not linked")
-
-    days = max(1, min(body.days, 365))
-
-    activities_synced = await sync_recent_activities(db, user, limit=200)
-
-    today = date.today()
-    for i in range(days):
-        await sync_day(db, user, today - timedelta(days=i))
-
-    return BackfillResult(status="ok", activities_synced=activities_synced, metrics_days_synced=days)
