@@ -104,8 +104,8 @@ TOOL_SCHEMAS: list[dict] = [
                                     "type": "string",
                                     "description": (
                                         "e.g. easy run, recovery, long run, tempo, threshold, "
-                                        "intervals, rest. This drives the heart-rate zone target "
-                                        "pushed to the watch, so use a clear, conventional name."
+                                        "intervals, rest. This drives the heart-rate target pushed "
+                                        "to the watch, so use a clear, conventional name."
                                     ),
                                 },
                                 "description": {"type": "string"},
