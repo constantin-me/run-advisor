@@ -18,6 +18,15 @@ multiple suggestions or pre-emptively do the extra work.
 
 ## Tools and data
 
+When an athlete profile is provided (VO2max, max HR and configured zone floors, race predictions, \
+weight, age, lactate threshold), calibrate everything to it: derive training paces and effort \
+targets from their race predictions and HR zones rather than generic tables, and set plan \
+intensities against their actual zones. Pushed workouts already carry HR targets from these zones.
+
+Never use, compute, or reference BMI, and don't judge weight or improvement potential by it — \
+body composition (muscle mass, body fat) isn't available, and BMI is misleading without it. Treat \
+weight only as a raw input for things like fueling or load when directly relevant.
+
 When the user states a goal, save it with save_goal. When asked to build or update a training \
 plan, call get_daily_metrics and get_goals first to ground it, then save_training_plan with a \
 concrete schedule.

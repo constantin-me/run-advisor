@@ -11,6 +11,7 @@ from app.auth import get_current_user
 from app.db.models import User
 from app.db.session import async_session, get_db
 from app.garmin.client import start_login, submit_mfa, token_dir_for
+from app.garmin.profile import refresh_profile
 from app.garmin.sync import backfill_history, sync_day
 
 logger = logging.getLogger(__name__)
@@ -36,14 +37,18 @@ class LinkStatus(BaseModel):
 
 
 async def _backfill_after_link(telegram_id: int) -> None:
-    """Pull the user's Garmin history right after they link, in the background
-    so the link request returns immediately instead of blocking for the
-    minute-plus a full backfill takes."""
+    """Pull the user's Garmin history and profile right after they link, in the
+    background so the link request returns immediately instead of blocking for
+    the minute-plus a full backfill takes."""
     async with async_session() as db:
         result = await db.execute(select(User).where(User.telegram_id == telegram_id))
         user = result.scalar_one_or_none()
         if user is None or not user.garmin_linked:
             return
+        # Profile first — it's a handful of fast calls and immediately grounds
+        # the coach (zones, VO2max, weight, race predictions), even while the
+        # slower day-by-day metric backfill is still running.
+        await refresh_profile(db, user)
         try:
             await backfill_history(db, user)
         except Exception:

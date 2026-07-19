@@ -32,6 +32,12 @@ class User(Base):
     location_name: Mapped[str | None] = mapped_column(String)
     timezone: Mapped[str | None] = mapped_column(String)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Normalized snapshot of the athlete's Garmin profile — weight, max HR, HR
+    # zone floors, VO2max, race predictions, fitness age, lactate threshold.
+    # See app/garmin/profile.py for the shape.
+    garmin_profile: Mapped[dict | None] = mapped_column(JSON)
+    profile_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_progress_eval_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )

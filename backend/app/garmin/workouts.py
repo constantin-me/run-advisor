@@ -82,14 +82,46 @@ async def estimate_max_hr(db: AsyncSession, user: User) -> int | None:
     return int(peak) if peak else None
 
 
-def _hr_range(zone: int, max_hr: int) -> tuple[int, int]:
+def _hr_range_from_pct(zone: int, max_hr: int) -> tuple[int, int]:
     lo_pct, hi_pct = _ZONE_HR_PCT[zone]
     lo = max(_MIN_BPM, round(lo_pct * max_hr))
     hi = min(_MAX_BPM, round(hi_pct * max_hr))
     return lo, hi
 
 
-def _build_step(workout_type: str, distance_m: float | None, max_hr: int | None) -> ExecutableStep:
+def _hr_range_from_zones(zone: int, zone_floors: list[int], max_hr: int) -> tuple[int, int]:
+    """Turn an intensity level into a bpm range using the athlete's own
+    configured Garmin zone floors — their real boundaries, not a generic
+    %-of-max estimate. zone_floors is [z1..z5] floor bpm; a zone spans from its
+    own floor up to the next zone's floor (or max HR for zone 5)."""
+    lo = zone_floors[zone - 1]
+    hi = zone_floors[zone] if zone < 5 else max_hr
+    lo = max(_MIN_BPM, int(lo))
+    hi = min(_MAX_BPM, int(hi))
+    return lo, hi
+
+
+def _resolve_hr_range(zone: int, profile: dict | None, max_hr_est: int | None) -> tuple[int, int] | None:
+    """Best available custom bpm range for the intensity level:
+    1. the athlete's configured Garmin zone floors (exact, personal),
+    2. else a %-of-max band off an estimated max HR,
+    3. else None (caller falls back to a zone-number reference)."""
+    hr = (profile or {}).get("hr") or {}
+    floors = hr.get("zone_floors")
+    zmax = hr.get("max_hr")
+    if isinstance(floors, list) and len(floors) == 5 and zmax:
+        return _hr_range_from_zones(zone, floors, int(zmax))
+    if max_hr_est:
+        return _hr_range_from_pct(zone, max_hr_est)
+    return None
+
+
+def _build_step(
+    workout_type: str,
+    distance_m: float | None,
+    profile: dict | None,
+    max_hr_est: int | None,
+) -> ExecutableStep:
     if distance_m:
         end_condition = {
             "conditionTypeId": ConditionType.DISTANCE,
@@ -111,10 +143,9 @@ def _build_step(workout_type: str, distance_m: float | None, max_hr: int | None)
 
     # Intensity target is heart-rate based (HR is the honest governor for
     # running — pace drifts with terrain, heat, and fatigue). Prefer an
-    # explicit custom bpm range derived from the athlete's own max HR, so the
-    # limits are their real numbers rather than Garmin's pre-defined zone
-    # bands. Only when we can't estimate max HR do we fall back to referencing
-    # a configured zone number.
+    # explicit custom bpm range from the athlete's own configured Garmin zones
+    # so the limits are their real numbers; fall back to a %-of-max estimate,
+    # then to referencing a zone number if we have no HR data at all.
     zone = hr_zone_for(workout_type)
     target_type = {
         "workoutTargetTypeId": TargetType.HEART_RATE_ZONE,
@@ -123,8 +154,9 @@ def _build_step(workout_type: str, distance_m: float | None, max_hr: int | None)
     }
 
     extra: dict = {}
-    if max_hr is not None:
-        lo, hi = _hr_range(zone, max_hr)
+    hr_range = _resolve_hr_range(zone, profile, max_hr_est)
+    if hr_range is not None:
+        lo, hi = hr_range
         # Custom HR target: raw bpm bounds, no zoneNumber. Garmin's Connect
         # workout API takes targetValueOne/Two as the low/high heart rate.
         extra["targetValueOne"] = lo
@@ -143,13 +175,18 @@ def _build_step(workout_type: str, distance_m: float | None, max_hr: int | None)
 
 
 def build_running_workout(
-    workout_type: str, description: str | None, distance_m, pace_s_per_km, max_hr: int | None = None
+    workout_type: str,
+    description: str | None,
+    distance_m,
+    pace_s_per_km,
+    profile: dict | None = None,
+    max_hr_est: int | None = None,
 ) -> RunningWorkout:
     distance = float(distance_m) if distance_m is not None else None
     pace = float(pace_s_per_km) if pace_s_per_km is not None else None
     # Pace no longer drives the step target (heart rate does), but it's still
     # the best estimate we have for the workout's expected duration.
-    step = _build_step(workout_type, distance, max_hr)
+    step = _build_step(workout_type, distance, profile, max_hr_est)
 
     if distance and pace:
         duration_s = int(distance / (1000.0 / pace))
@@ -229,9 +266,11 @@ async def sync_plan_to_garmin(db: AsyncSession, user: User) -> dict:
     wk_result = await db.execute(select(PlanWorkout).where(PlanWorkout.plan_id == plan.id))
     workouts = list(wk_result.scalars().all())
 
-    # One estimate for the whole push — every step's custom HR range is scaled
-    # off the athlete's max HR.
-    max_hr = await estimate_max_hr(db, user)
+    # Resolve HR targets once for the whole push: the athlete's configured
+    # zones (from their Garmin profile) if we have them, else a %-of-max band
+    # off the highest HR we've observed in their activities.
+    profile = user.garmin_profile
+    max_hr_est = await estimate_max_hr(db, user)
 
     created = skipped_rest = skipped_already_synced = failed = 0
 
@@ -245,7 +284,12 @@ async def sync_plan_to_garmin(db: AsyncSession, user: User) -> dict:
 
         try:
             workout = build_running_workout(
-                w.workout_type, w.description, w.target_distance_m, w.target_pace_s_per_km, max_hr=max_hr
+                w.workout_type,
+                w.description,
+                w.target_distance_m,
+                w.target_pace_s_per_km,
+                profile=profile,
+                max_hr_est=max_hr_est,
             )
             upload_result = await asyncio.to_thread(client.upload_running_workout, workout)
             workout_id = upload_result.get("workoutId")

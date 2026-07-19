@@ -61,6 +61,53 @@ def _format_metrics(metrics: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_hms(seconds) -> str | None:
+    if not seconds:
+        return None
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _format_profile(profile: dict) -> str:
+    """Readable athlete profile block for the system prompt — the foundational
+    facts (fitness, physiology, configured zones) the coach should calibrate
+    all advice against."""
+    parts: list[str] = []
+    if profile.get("vo2max"):
+        parts.append(f"VO2max {profile['vo2max']:.0f}")
+    hr = profile.get("hr") or {}
+    if hr.get("max_hr"):
+        floors = hr.get("zone_floors")
+        zones = f" (zone floors {'/'.join(str(f) for f in floors)})" if floors else ""
+        parts.append(f"max HR {hr['max_hr']}{zones}")
+    lthr = profile.get("lactate_threshold_hr") or hr.get("lactate_threshold_hr")
+    if lthr:
+        parts.append(f"lactate threshold HR {lthr}")
+    if profile.get("resting_hr"):
+        parts.append(f"resting HR {profile['resting_hr']}")
+    if profile.get("weight_kg"):
+        parts.append(f"weight {profile['weight_kg']} kg")
+    if profile.get("chronological_age"):
+        parts.append(f"age {profile['chronological_age']}")
+
+    lines = []
+    if parts:
+        lines.append("Athlete profile: " + ", ".join(parts) + ".")
+
+    races = profile.get("race_predictions_s") or {}
+    race_bits = []
+    for key, label in (("5k", "5K"), ("10k", "10K"), ("half", "HM"), ("marathon", "M")):
+        t = _fmt_hms(races.get(key))
+        if t:
+            race_bits.append(f"{label} {t}")
+    if race_bits:
+        lines.append("Garmin race predictions: " + ", ".join(race_bits) + ".")
+
+    return "\n".join(lines)
+
+
 def _format_recovery(status) -> str:
     today = date.today()
     if status.metric_date == today:
@@ -109,6 +156,16 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
         system_prompt += "\n\nKnown facts about this user:\n" + "\n".join(
             f"- {m}" for m in memories
         )
+
+    if user.garmin_profile:
+        profile_block = _format_profile(user.garmin_profile)
+        if profile_block:
+            system_prompt += "\n\n" + profile_block
+        if not user.garmin_profile.get("weight_kg"):
+            system_prompt += (
+                "\n\nWeight is unknown (not on file in Garmin). If it becomes relevant to the "
+                "user's question (e.g. fueling, load), ask them for it once, then store_memory it."
+            )
 
     metrics = await get_daily_metrics(db, user, days=7)
     if metrics:
