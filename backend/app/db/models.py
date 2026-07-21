@@ -149,6 +149,11 @@ class PlanWorkout(Base):
     description: Mapped[str | None] = mapped_column(Text)
     target_distance_m: Mapped[float | None] = mapped_column(Numeric)
     target_pace_s_per_km: Mapped[float | None] = mapped_column(Numeric)
+    # Structured step breakdown for complex sessions (warmup, repeat blocks,
+    # recoveries, cooldown). Null means a simple single-step workout, which
+    # keeps the legacy distance/pace path working unchanged. See
+    # app/garmin/workouts.py for the schema.
+    steps: Mapped[list | None] = mapped_column(JSON)
     done: Mapped[bool] = mapped_column(Boolean, default=False)
     garmin_workout_id: Mapped[str | None] = mapped_column(String)
     garmin_scheduled_id: Mapped[str | None] = mapped_column(String)

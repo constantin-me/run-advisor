@@ -2,6 +2,16 @@ import { useEffect, useState } from "react";
 import { IconCheck, IconWatch } from "../components/icons";
 import { apiFetch } from "../lib/api";
 
+type Step = {
+  kind?: string;
+  distance_m?: number;
+  duration_s?: number;
+  lap_button?: boolean;
+  intensity?: string;
+  repeat?: number;
+  steps?: Step[];
+};
+
 type Workout = {
   id: number;
   date: string;
@@ -9,6 +19,7 @@ type Workout = {
   description: string | null;
   distance_m: number | null;
   pace_s_per_km: number | null;
+  steps: Step[] | null;
   done: boolean;
   synced_to_garmin: boolean;
 };
@@ -18,6 +29,30 @@ type Plan = {
   title: string;
   workouts: Workout[];
 };
+
+function formatAmount(step: Step): string {
+  if (step.distance_m) {
+    return step.distance_m >= 1000 ? `${(step.distance_m / 1000).toFixed(step.distance_m % 1000 ? 1 : 0)}km` : `${step.distance_m}m`;
+  }
+  if (step.duration_s) {
+    const m = Math.round(step.duration_s / 60);
+    return m >= 1 ? `${m}min` : `${step.duration_s}s`;
+  }
+  return "lap";
+}
+
+function formatStep(step: Step): string {
+  const label = step.intensity ?? step.kind ?? "run";
+  return `${formatAmount(step)} ${label}`;
+}
+
+/** One line per top-level entry; a repeat block reads "3 × 200m sprint / 200m easy". */
+function formatStepLine(step: Step): string {
+  if (step.repeat && step.steps?.length) {
+    return `${step.repeat} × ${step.steps.map(formatStep).join(" / ")}`;
+  }
+  return `${step.kind ?? "run"}: ${formatStep(step)}`;
+}
 
 function formatWorkoutDate(iso: string): string {
   const d = new Date(iso + "T00:00:00");
@@ -107,6 +142,13 @@ export default function Plan() {
                   <div className="workout-date">{formatWorkoutDate(w.date)}</div>
                   <div className="workout-type">{w.type}</div>
                   {w.description && <div className="workout-desc">{w.description}</div>}
+                  {w.steps && w.steps.length > 0 && (
+                    <ul className="workout-steps">
+                      {w.steps.map((s, i) => (
+                        <li key={i}>{formatStepLine(s)}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
                 <div className="workout-trail">
                   {w.distance_m && <div>{(w.distance_m / 1000).toFixed(1)} km</div>}

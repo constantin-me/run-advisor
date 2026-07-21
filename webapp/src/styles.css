@@ -576,6 +576,19 @@ p {
   color: var(--color-text-muted);
   margin-top: 2px;
 }
+/* Step breakdown of a structured session (warm-up, repeat blocks, cool-down). */
+.workout-steps {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0 0 0 9px;
+  border-left: 2px solid var(--color-border);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+.workout-steps li::first-letter {
+  text-transform: uppercase;
+}
 .workout-trail {
   flex: none;
   text-align: right;

@@ -18,6 +18,7 @@ class WorkoutOut(BaseModel):
     description: str | None
     distance_m: float | None
     pace_s_per_km: float | None
+    steps: list | None
     done: bool
     synced_to_garmin: bool
 
@@ -54,6 +55,7 @@ async def get_plan(user: User = Depends(get_current_user), db: AsyncSession = De
             "description": w.description,
             "distance_m": float(w.target_distance_m) if w.target_distance_m is not None else None,
             "pace_s_per_km": float(w.target_pace_s_per_km) if w.target_pace_s_per_km is not None else None,
+            "steps": w.steps,
             "done": w.done,
             "synced_to_garmin": w.garmin_workout_id is not None,
         }
