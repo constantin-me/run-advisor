@@ -14,6 +14,7 @@ class GoalOut(BaseModel):
     id: int
     text: str
     target_date: str | None
+    status: str = "active"
 
 
 class CreateGoalRequest(BaseModel):

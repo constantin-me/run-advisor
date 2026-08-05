@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import date, timedelta
 from typing import Any
 
@@ -48,8 +49,19 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "get_goals",
-            "description": "Get the user's active running goals.",
-            "parameters": {"type": "object", "properties": {}},
+            "description": (
+                "Get the user's running goals. By default only active goals; "
+                "pass include_completed=true to also see recently completed ones."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_completed": {
+                        "type": "boolean",
+                        "description": "If true, include completed goals as well as active ones",
+                    }
+                },
+            },
         },
     },
     {
@@ -70,6 +82,49 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                 },
                 "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "complete_goal",
+            "description": (
+                "Mark an active goal as completed after the user achieved it. "
+                "Call this when activities clearly show the goal was met."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal_id": {
+                        "type": "integer",
+                        "description": "Id of the goal to mark completed",
+                    }
+                },
+                "required": ["goal_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_checkin_time",
+            "description": (
+                "Set the local hour when the user receives their daily progress "
+                "update / reminder push. Only whole hours (e.g. 7am, 12:00, 14:00, 2pm). "
+                "Call this when they ask to change when they get updates or reminders."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "time": {
+                        "type": "string",
+                        "description": (
+                            "Whole-hour time string, e.g. '7', '07:00', '7am', '2pm', '14:00'"
+                        ),
+                    }
+                },
+                "required": ["time"],
             },
         },
     },
@@ -337,15 +392,25 @@ async def get_recent_activities(db: AsyncSession, user: User, n: int = 5) -> lis
     return [_activity_to_dict(a) for a in result.scalars().all()]
 
 
-async def get_goals(db: AsyncSession, user: User) -> list[dict]:
-    result = await db.execute(
-        select(Goal).where(Goal.user_id == user.id, Goal.status == "active")
-    )
+async def get_goals(
+    db: AsyncSession, user: User, *, include_completed: bool = False
+) -> list[dict]:
+    if include_completed:
+        result = await db.execute(
+            select(Goal)
+            .where(Goal.user_id == user.id, Goal.status.in_(("active", "completed")))
+            .order_by(Goal.created_at.desc())
+        )
+    else:
+        result = await db.execute(
+            select(Goal).where(Goal.user_id == user.id, Goal.status == "active")
+        )
     return [
         {
             "id": g.id,
             "text": g.text,
             "target_date": g.target_date.isoformat() if g.target_date else None,
+            "status": g.status,
         }
         for g in result.scalars().all()
     ]
@@ -359,7 +424,107 @@ async def save_goal(
     db.add(goal)
     await db.commit()
     await db.refresh(goal)
-    return {"id": goal.id, "text": goal.text, "target_date": target_date}
+    return {
+        "id": goal.id,
+        "text": goal.text,
+        "target_date": target_date,
+        "status": goal.status,
+    }
+
+
+async def complete_goal(db: AsyncSession, user: User, goal_id: int) -> dict:
+    result = await db.execute(
+        select(Goal).where(Goal.id == goal_id, Goal.user_id == user.id)
+    )
+    goal = result.scalar_one_or_none()
+    if goal is None:
+        return {"error": "not_found", "message": f"no goal with id {goal_id}"}
+    if goal.status == "completed":
+        return {
+            "id": goal.id,
+            "text": goal.text,
+            "status": "completed",
+            "already_completed": True,
+        }
+    goal.status = "completed"
+    await db.commit()
+    return {"id": goal.id, "text": goal.text, "status": "completed"}
+
+
+_CHECKIN_TIME_RE = re.compile(
+    r"^\s*(?:"
+    r"(?P<h12>\d{1,2})\s*(?P<ampm>[ap]\.?m\.?)"
+    r"|(?P<h24>\d{1,2})(?::(?P<min>\d{2}))?"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_checkin_hour(time_str: str) -> int | dict:
+    """Parse a whole-hour time string into 0–23, or an error dict."""
+    m = _CHECKIN_TIME_RE.match(time_str or "")
+    if not m:
+        return {
+            "error": "invalid_time",
+            "message": (
+                "couldn't parse that time — use a whole hour like 7, 07:00, 7am, or 2pm"
+            ),
+        }
+
+    if m.group("ampm"):
+        hour = int(m.group("h12"))
+        ampm = m.group("ampm").lower().replace(".", "")
+        if hour < 1 or hour > 12:
+            return {
+                "error": "invalid_time",
+                "message": "hour with am/pm must be 1–12",
+            }
+        if ampm == "am":
+            hour = 0 if hour == 12 else hour
+        else:
+            hour = 12 if hour == 12 else hour + 12
+        return hour
+
+    hour = int(m.group("h24"))
+    minute = m.group("min")
+    if minute is not None and minute != "00":
+        return {
+            "error": "invalid_time",
+            "message": "only whole hours are supported (e.g. 14:00, not 14:30)",
+        }
+    if hour < 0 or hour > 23:
+        return {
+            "error": "invalid_time",
+            "message": "hour must be between 0 and 23",
+        }
+    return hour
+
+
+def _format_hour_label(hour: int) -> str:
+    if hour == 0:
+        return "12:00 AM"
+    if hour < 12:
+        return f"{hour}:00 AM"
+    if hour == 12:
+        return "12:00 PM"
+    return f"{hour - 12}:00 PM"
+
+
+async def set_checkin_time(db: AsyncSession, user: User, time_str: str) -> dict:
+    from app.config import settings
+
+    parsed = parse_checkin_hour(time_str)
+    if isinstance(parsed, dict):
+        return parsed
+
+    user.notification_hour = parsed
+    await db.commit()
+    tz = user.timezone or settings.tz
+    return {
+        "notification_hour": parsed,
+        "local_time_label": _format_hour_label(parsed),
+        "timezone": tz,
+    }
 
 
 async def get_training_plan(db: AsyncSession, user: User) -> dict | None:
@@ -606,11 +771,17 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
     if name == "get_recent_activities":
         return await get_recent_activities(db, user, n=arguments.get("n", 5))
     if name == "get_goals":
-        return await get_goals(db, user)
+        return await get_goals(
+            db, user, include_completed=bool(arguments.get("include_completed", False))
+        )
     if name == "save_goal":
         return await save_goal(
             db, user, text=arguments["text"], target_date=arguments.get("target_date")
         )
+    if name == "complete_goal":
+        return await complete_goal(db, user, goal_id=arguments["goal_id"])
+    if name == "set_checkin_time":
+        return await set_checkin_time(db, user, time_str=arguments["time"])
     if name == "get_training_plan":
         return await get_training_plan(db, user)
     if name == "save_training_plan":

@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
     InlineKeyboardButton,
@@ -24,6 +24,10 @@ dp = Dispatcher()
 _bot_username: str | None = None
 
 EDIT_INTERVAL_SECONDS = 1.0
+# After a bare /location, treat the next text message as the city for this long.
+_LOCATION_PENDING_TTL_S = 120.0
+# telegram_id -> monotonic deadline
+_pending_location: dict[int, float] = {}
 
 BOT_COMMANDS = [
     ("help", "What this bot does and how to get started"),
@@ -40,13 +44,24 @@ HELP_TEXT = (
     "Commands:\n"
     "/recovery — check your current recovery status\n"
     "/weather — forecast for your location\n"
-    "/location — set or check your location\n"
+    "/location <city> — set your location, e.g. /location Bucharest\n"
     "Or just message me anything about your training."
 )
 
 _NOT_LINKED_TEXT = (
     "Garmin isn't linked yet. Run /start, then tap Open Coach to link your account."
 )
+
+
+def _set_pending_location(telegram_id: int) -> None:
+    _pending_location[telegram_id] = time.monotonic() + _LOCATION_PENDING_TTL_S
+
+
+def _pop_pending_location(telegram_id: int) -> bool:
+    deadline = _pending_location.pop(telegram_id, None)
+    if deadline is None:
+        return False
+    return time.monotonic() <= deadline
 
 
 async def get_bot_username() -> str:
@@ -83,6 +98,29 @@ async def _get_user_by_telegram_id(telegram_id: int) -> User | None:
     async with async_session() as db:
         result = await db.execute(select(User).where(User.telegram_id == telegram_id))
         return result.scalar_one_or_none()
+
+
+async def _apply_location(message: Message, city: str) -> None:
+    from app.coach.tools import set_location
+
+    user = await _get_user_by_telegram_id(message.from_user.id)
+    async with async_session() as db:
+        if user is None:
+            user = User(telegram_id=message.from_user.id)
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        else:
+            user = await db.get(User, user.id)
+        result = await set_location(db, user, city)
+
+    if "error" in result:
+        await message.answer(
+            f'Couldn\'t find a location matching "{city}". Try a different spelling or a nearby larger city.'
+        )
+        return
+
+    await message.answer(f"Location set to {result['location_name']}.")
 
 
 async def _stream_agent_reply(chat_id: int, token_iter: AsyncIterator[str]) -> None:
@@ -153,40 +191,26 @@ async def help_command(message: Message) -> None:
 
 
 @dp.message(Command("location"))
-async def location_command(message: Message) -> None:
-    from app.coach.tools import set_location
-
-    city = (message.text or "").partition(" ")[2].strip()
+async def location_command(message: Message, command: CommandObject) -> None:
+    city = (command.args or "").strip()
     user = await _get_user_by_telegram_id(message.from_user.id)
 
     if not city:
+        _set_pending_location(message.from_user.id)
         if user and user.location_name:
             await message.answer(
-                f"Your location is set to {user.location_name}. Send /location <city> to change it."
+                f"Your location is set to {user.location_name}. "
+                "Send a city name, or /location <city> (e.g. /location Bucharest)."
             )
         else:
             await message.answer(
-                "No location set yet. Send /location <city>, e.g. /location Bucharest."
+                "No location set yet. Send a city name, or /location <city>, "
+                "e.g. /location Bucharest."
             )
         return
 
-    async with async_session() as db:
-        if user is None:
-            user = User(telegram_id=message.from_user.id)
-            db.add(user)
-            await db.commit()
-            await db.refresh(user)
-        else:
-            user = await db.get(User, user.id)
-        result = await set_location(db, user, city)
-
-    if "error" in result:
-        await message.answer(
-            f'Couldn\'t find a location matching "{city}". Try a different spelling or a nearby larger city.'
-        )
-        return
-
-    await message.answer(f"Location set to {result['location_name']}.")
+    _pending_location.pop(message.from_user.id, None)
+    await _apply_location(message, city)
 
 
 @dp.message(Command("weather"))
@@ -250,9 +274,16 @@ async def recovery_command(message: Message) -> None:
 async def chat(message: Message) -> None:
     from app.coach.agent import stream_reply
 
+    telegram_id = message.from_user.id
+    if _pop_pending_location(telegram_id):
+        city = (message.text or "").strip()
+        if city and not city.startswith("/"):
+            await _apply_location(message, city)
+            return
+
     await _stream_agent_reply(
         message.chat.id,
-        stream_reply(telegram_id=message.from_user.id, text=message.text),
+        stream_reply(telegram_id=telegram_id, text=message.text),
     )
 
 

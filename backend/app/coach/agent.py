@@ -7,10 +7,12 @@ from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.coach.goals import evaluate_goal_achievements, format_achievement_directive
 from app.coach.prompts import SYSTEM_PROMPT
 from app.coach.recovery import compute_recovery_status
 from app.coach.tools import (
     TOOL_SCHEMAS,
+    _format_hour_label,
     execute_tool,
     get_daily_metrics,
     get_goals,
@@ -187,12 +189,29 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
     goals = await get_goals(db, user)
     if goals:
         goal_lines = "\n".join(
-            f"- {g['text']}" + (f" (by {g['target_date']})" if g["target_date"] else "")
+            f"- id={g['id']} {g['text']}"
+            + (f" (by {g['target_date']})" if g["target_date"] else "")
             for g in goals
         )
         system_prompt += "\n\nActive goals:\n" + goal_lines
     else:
         system_prompt += "\n\nNo active goals set."
+
+    try:
+        hits = await evaluate_goal_achievements(db, user)
+        if hits:
+            system_prompt += "\n\n" + format_achievement_directive(hits)
+    except Exception:
+        logger.exception(
+            "Goal achievement evaluation failed for user_id=%s", user.id
+        )
+
+    hour = user.notification_hour if user.notification_hour is not None else 7
+    tz = user.timezone or settings.tz
+    system_prompt += (
+        f"\n\nDaily check-in push: {_format_hour_label(hour)} local "
+        f"({tz}). Use set_checkin_time if the user wants a different whole hour."
+    )
 
     plan = await get_training_plan(db, user)
     if plan:
@@ -341,7 +360,7 @@ async def stream_chat(
 async def generate_progress_summary(
     db: AsyncSession, user: User, instruction: str
 ) -> str:
-    """Non-interactive coach pass used by the midnight job. Does not touch
+    """Non-interactive coach pass used by the daily check-in job. Does not touch
     chat_messages — the result is pushed via Telegram, not shown as a turn
     in the visible conversation."""
     try:

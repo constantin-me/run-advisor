@@ -32,6 +32,8 @@ class User(Base):
     location_name: Mapped[str | None] = mapped_column(String)
     timezone: Mapped[str | None] = mapped_column(String)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Local hour (0–23) for the daily progress push. Default 7am.
+    notification_hour: Mapped[int] = mapped_column(default=7)
     # Normalized snapshot of the athlete's Garmin profile — weight, max HR, HR
     # zone floors, VO2max, race predictions, fitness age, lactate threshold.
     # See app/garmin/profile.py for the shape.

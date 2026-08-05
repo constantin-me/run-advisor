@@ -1,11 +1,13 @@
 import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select
 
+from app.coach.goals import evaluate_goal_achievements, format_achievement_directive
 from app.coach.recovery import compute_recovery_status
 from app.config import settings
 from app.db.models import User
@@ -19,8 +21,30 @@ logger = logging.getLogger(__name__)
 # Profile data (zones, VO2max, race predictions, weight) changes slowly; a
 # weekly refresh in the nightly job is plenty.
 PROFILE_REFRESH_AFTER = timedelta(days=7)
+DEFAULT_NOTIFICATION_HOUR = 7
 
 scheduler = AsyncIOScheduler(timezone=settings.tz)
+
+
+def _user_local_now(user: User) -> datetime:
+    tz_name = user.timezone or settings.tz
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Invalid timezone %r for user_id=%s — falling back to %s",
+            tz_name,
+            user.id,
+            settings.tz,
+        )
+        tz = ZoneInfo(settings.tz)
+    return datetime.now(tz)
+
+
+def _notification_hour(user: User) -> int:
+    if user.notification_hour is None:
+        return DEFAULT_NOTIFICATION_HOUR
+    return int(user.notification_hour)
 
 
 async def run_user_progress(user_id: int, day: date) -> None:
@@ -45,6 +69,18 @@ async def run_user_progress(user_id: int, day: date) -> None:
             "(2-4 sentence) progress update for them, phrased for a push notification, not a "
             "conversation. If something in the data is worth remembering long-term, call store_memory."
         )
+
+        # Deterministic goal hits — same pattern as recovery flags so the push
+        # actually congratulates instead of hoping the LLM notices.
+        try:
+            hits = await evaluate_goal_achievements(db, user)
+        except Exception:
+            logger.exception(
+                "Goal achievement evaluation failed for user_id=%s", user.id
+            )
+            hits = []
+        if hits:
+            instruction = format_achievement_directive(hits) + "\n\n" + instruction
 
         # Deterministic trigger for the push to actually lead with a recovery
         # flag, rather than hoping the LLM notices it in the data dump.
@@ -71,7 +107,7 @@ async def run_user_progress(user_id: int, day: date) -> None:
         # get_forecast never raises (it swallows and logs failures), so this
         # is safe to call unconditionally when a location is set. Uses the
         # user's own timezone (from geocoding) so "upcoming" is their local
-        # next day, not UTC's — the job itself fires at UTC midnight.
+        # next day, not UTC's.
         if user.latitude is not None and user.longitude is not None:
             forecast = await get_forecast(
                 float(user.latitude),
@@ -102,16 +138,20 @@ async def run_user_progress(user_id: int, day: date) -> None:
 
 
 async def run_daily_progress_job() -> None:
+    """Hourly sweep: push users whose local hour matches their notification_hour."""
     yesterday = date.today() - timedelta(days=1)
     async with async_session() as db:
-        result = await db.execute(select(User.id).where(User.garmin_linked.is_(True)))
-        user_ids = list(result.scalars().all())
+        result = await db.execute(select(User).where(User.garmin_linked.is_(True)))
+        users = list(result.scalars().all())
 
-    for user_id in user_ids:
+    for user in users:
         try:
-            await run_user_progress(user_id, yesterday)
+            local = _user_local_now(user)
+            if local.hour != _notification_hour(user):
+                continue
+            await run_user_progress(user.id, yesterday)
         except Exception:
-            logger.exception("Daily progress job failed for user_id=%s", user_id)
+            logger.exception("Daily progress job failed for user_id=%s", user.id)
 
 
 # --- Bi-weekly progress evaluation ---------------------------------------
@@ -200,8 +240,8 @@ async def run_progress_eval_job() -> None:
 def register_jobs() -> None:
     scheduler.add_job(
         run_daily_progress_job,
-        CronTrigger(hour=0, minute=0),
-        id="midnight_progress",
+        CronTrigger(minute=0),
+        id="hourly_progress",
         replace_existing=True,
     )
     # Weekly sweep; per-user 14-day gating lives inside the job.
