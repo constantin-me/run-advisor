@@ -147,6 +147,10 @@ class PlanWorkout(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     plan_id: Mapped[int] = mapped_column(ForeignKey("training_plans.id"), index=True)
     scheduled_date: Mapped[date] = mapped_column(Date)
+    # Garmin sport key (see app/garmin/sports.py). Decides the workout type
+    # pushed to the watch; everything created before multi-sport support is a
+    # run, hence the default.
+    sport: Mapped[str] = mapped_column(String, nullable=False, server_default="running", default="running")
     workout_type: Mapped[str] = mapped_column(String)
     description: Mapped[str | None] = mapped_column(Text)
     target_distance_m: Mapped[float | None] = mapped_column(Numeric)

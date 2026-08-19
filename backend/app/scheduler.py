@@ -182,6 +182,18 @@ def _progress_instruction(p: dict) -> str:
         f"- Resting HR: {c['avg_resting_hr']} ({_fmt_delta(d['avg_resting_hr'], ' bpm', lower_is_better=True)})",
         f"- VO2max: {c['vo2max']} ({_fmt_delta(d['vo2max'], '', lower_is_better=False)})",
     ]
+    # Cross-training counts as training: a fortnight of gym work is a different
+    # story from a fortnight off, and the note should say so.
+    if c.get("other_sessions") or c.get("strength_sessions"):
+        mix = ", ".join(
+            f"{count}x {sport}" for sport, count in sorted(c.get("sessions_by_sport", {}).items())
+        )
+        lines.append(
+            f"- Cross-training: {c['strength_sessions']} strength, {c['other_sessions']} non-run "
+            f"sessions ({_fmt_delta(d.get('other_sessions'), '', lower_is_better=False)}) — {mix}"
+        )
+    if c.get("total_training_time_s"):
+        lines.append(f"- Total training time: {round(c['total_training_time_s'] / 3600, 1)}h")
     return (
         "\n".join(lines)
         + "\n\nWrite a short (2-4 sentence) progress note for a push notification: what improved, "
@@ -199,7 +211,7 @@ async def run_user_progress_eval(user_id: int) -> None:
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
         progress = await compute_progress(db, user)
         if progress is None:
-            return  # not enough running yet — try again next cycle
+            return  # no training recorded yet — try again next cycle
 
         summary = await generate_progress_summary(db, user, _progress_instruction(progress))
 

@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api/plan")
 class WorkoutOut(BaseModel):
     id: int
     date: str
+    sport: str
     type: str
     description: str | None
     distance_m: float | None
@@ -51,6 +52,7 @@ async def get_plan(user: User = Depends(get_current_user), db: AsyncSession = De
         {
             "id": w.id,
             "date": w.scheduled_date.isoformat(),
+            "sport": w.sport or "running",
             "type": w.workout_type,
             "description": w.description,
             "distance_m": float(w.target_distance_m) if w.target_distance_m is not None else None,

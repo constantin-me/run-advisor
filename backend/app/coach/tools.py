@@ -8,9 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.coach.recovery import compute_recovery_status
 from app.db.models import Activity, DailyMetric, Goal, PlanWorkout, TrainingPlan, User
+from app.garmin.sports import DEFAULT_SPORT, get_sport, sport_keys
 from app.weather.client import geocode, get_forecast
 
 logger = logging.getLogger(__name__)
+
+# Sports the coach may schedule — the registry is the single source of truth,
+# so a new sport there shows up in the tool schema automatically.
+_SPORT_KEYS = sport_keys()
 
 TOOL_SCHEMAS: list[dict] = [
     {
@@ -158,12 +163,21 @@ TOOL_SCHEMAS: list[dict] = [
                                     "type": "string",
                                     "description": "ISO date YYYY-MM-DD",
                                 },
+                                "sport": {
+                                    "type": "string",
+                                    "enum": _SPORT_KEYS,
+                                    "description": (
+                                        "Sport for this session. Defaults to running. Use "
+                                        "'strength' for gym sessions — never a run with fake steps."
+                                    ),
+                                },
                                 "workout_type": {
                                     "type": "string",
                                     "description": (
                                         "e.g. easy run, recovery, long run, tempo, threshold, "
-                                        "intervals, rest. This drives the heart-rate target pushed "
-                                        "to the watch, so use a clear, conventional name."
+                                        "intervals, rest, upper body, leg day. This drives the "
+                                        "heart-rate target pushed to the watch for HR-based "
+                                        "sports, so use a clear, conventional name."
                                     ),
                                 },
                                 "description": {"type": "string"},
@@ -203,9 +217,17 @@ TOOL_SCHEMAS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "date": {"type": "string", "description": "ISO date YYYY-MM-DD"},
+                    "sport": {
+                        "type": "string",
+                        "enum": _SPORT_KEYS,
+                        "description": (
+                            "Sport for this session — decides what lands on the watch. Defaults "
+                            "to running. A gym session is 'strength' with exercise steps."
+                        ),
+                    },
                     "workout_type": {
                         "type": "string",
-                        "description": "Short name, e.g. 'sprint intervals', 'easy run', 'tempo'",
+                        "description": "Short name, e.g. 'sprint intervals', 'easy run', 'push day'",
                     },
                     "description": {"type": "string"},
                     "steps": {
@@ -221,14 +243,42 @@ TOOL_SCHEMAS: list[dict] = [
                             '{"kind":"recovery","distance_m":200,"intensity":"easy"}]},'
                             '{"repeat":3,"steps":[{"kind":"run","distance_m":400,"intensity":"sprint"},'
                             '{"kind":"recovery","distance_m":400,"intensity":"easy"}]},'
-                            '{"kind":"cooldown","duration_s":600,"intensity":"easy"}]'
+                            '{"kind":"cooldown","duration_s":600,"intensity":"easy"}]\n'
+                            "For sport='strength', a step is an exercise with `exercise` (the "
+                            "Garmin catalog display name), `reps` and optional `weight_kg`; a set "
+                            "is a repeat block wrapping the exercise and its rest. Example — "
+                            "4x10 bench press with 2min rest, then 3x12 rows:\n"
+                            '[{"repeat":4,"steps":[{"kind":"exercise","exercise":"Barbell Bench Press",'
+                            '"reps":10,"weight_kg":60},{"kind":"rest","duration_s":120}]},'
+                            '{"repeat":3,"steps":[{"kind":"exercise","exercise":"Barbell Bent Over Row",'
+                            '"reps":12},{"kind":"rest","duration_s":90}]}]\n'
+                            "Use find_exercises when unsure an exercise name exists."
                         ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "kind": {
                                     "type": "string",
-                                    "enum": ["warmup", "run", "recovery", "rest", "cooldown"],
+                                    "enum": [
+                                        "warmup",
+                                        "run",
+                                        "recovery",
+                                        "rest",
+                                        "cooldown",
+                                        "exercise",
+                                    ],
+                                },
+                                "exercise": {
+                                    "type": "string",
+                                    "description": "Strength only — catalog display name, e.g. 'Barbell Deadlift'",
+                                },
+                                "reps": {
+                                    "type": "integer",
+                                    "description": "Strength only — repetitions in this set",
+                                },
+                                "weight_kg": {
+                                    "type": "number",
+                                    "description": "Strength only — target load, when the athlete gave one",
                                 },
                                 "distance_m": {"type": "number"},
                                 "duration_s": {"type": "number"},
@@ -545,6 +595,7 @@ async def get_training_plan(db: AsyncSession, user: User) -> dict | None:
     workouts = [
         {
             "date": w.scheduled_date.isoformat(),
+            "sport": w.sport or DEFAULT_SPORT,
             "type": w.workout_type,
             "description": w.description,
             "steps": w.steps,
@@ -607,6 +658,7 @@ async def save_training_plan(
                 plan_id=plan.id,
                 scheduled_date=scheduled,
                 workout_type=w["workout_type"],
+                sport=get_sport(w.get("sport")).key,
                 description=w.get("description"),
                 target_distance_m=w.get("distance_m"),
                 target_pace_s_per_km=w.get("pace_s_per_km"),
@@ -645,6 +697,7 @@ async def schedule_workout(
     user: User,
     date_str: str,
     workout_type: str,
+    sport: str | None = None,
     description: str | None = None,
     steps: list | None = None,
     distance_m: float | None = None,
@@ -686,6 +739,7 @@ async def schedule_workout(
         workout.done = False
 
     workout.workout_type = workout_type
+    workout.sport = get_sport(sport).key
     workout.description = description
     workout.steps = steps
     workout.target_distance_m = distance_m
@@ -763,6 +817,41 @@ async def get_recovery_status(db: AsyncSession, user: User) -> dict:
     }
 
 
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "function": {
+            "name": "find_exercises",
+            "description": (
+                "Search Garmin's strength-exercise catalog by name. Use it before building a "
+                "strength workout when unsure whether an exercise exists under that name — the "
+                "watch shows a generic category for anything it can't match."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": "Part of an exercise name, e.g. 'bench press', 'squat'",
+                    }
+                },
+                "required": ["term"],
+            },
+        },
+    }
+)
+
+
+def find_exercises(term: str, limit: int = 25) -> dict:
+    """Catalog names matching `term`, so the coach schedules exercises Garmin
+    actually knows instead of inventing labels."""
+    from garminconnect import exercises as exercise_catalog
+
+    matches = exercise_catalog.find(term)
+    names = [e["name"] for e in matches[:limit]]
+    return {"term": term, "total": len(matches), "names": names}
+
+
 async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict) -> Any:
     from app.memory.client import recall_memories, store_memory as memory_store
 
@@ -798,11 +887,14 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
             user,
             date_str=arguments["date"],
             workout_type=arguments["workout_type"],
+            sport=arguments.get("sport"),
             description=arguments.get("description"),
             steps=arguments.get("steps"),
             distance_m=arguments.get("distance_m"),
             pace_s_per_km=arguments.get("pace_s_per_km"),
         )
+    if name == "find_exercises":
+        return find_exercises(arguments["term"])
     if name == "set_location":
         return await set_location(db, user, city=arguments["city"])
     if name == "get_weather_forecast":

@@ -566,6 +566,10 @@ p {
   font-weight: 700;
   margin-bottom: 3px;
 }
+/* Sport tag next to the date — only shown for non-running sessions. */
+.workout-sport {
+  color: var(--color-accent, var(--color-text-muted));
+}
 .workout-type {
   font-weight: 600;
   font-size: 0.9rem;

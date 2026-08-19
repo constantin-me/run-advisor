@@ -10,11 +10,16 @@ type Step = {
   intensity?: string;
   repeat?: number;
   steps?: Step[];
+  // Strength steps are rep-based: an exercise name, reps, and an optional load.
+  exercise?: string;
+  reps?: number;
+  weight_kg?: number;
 };
 
 type Workout = {
   id: number;
   date: string;
+  sport: string;
   type: string;
   description: string | null;
   distance_m: number | null;
@@ -41,7 +46,27 @@ function formatAmount(step: Step): string {
   return "lap";
 }
 
+/** Sport key -> the label shown on the workout card. Running stays unlabelled:
+ *  it's the default and a badge on every run is noise. */
+const SPORT_LABELS: Record<string, string> = {
+  cycling: "Bike",
+  swimming: "Swim",
+  strength: "Strength",
+  cardio: "Cardio",
+  hiit: "HIIT",
+  yoga: "Yoga",
+  pilates: "Pilates",
+  mobility: "Mobility",
+  walking: "Walk",
+  hiking: "Hike",
+  other: "Other",
+};
+
 function formatStep(step: Step): string {
+  if (step.exercise) {
+    const load = step.weight_kg ? ` @ ${step.weight_kg}kg` : "";
+    return `${step.reps ?? 1} × ${step.exercise}${load}`;
+  }
   const label = step.intensity ?? step.kind ?? "run";
   return `${formatAmount(step)} ${label}`;
 }
@@ -49,8 +74,13 @@ function formatStep(step: Step): string {
 /** One line per top-level entry; a repeat block reads "3 × 200m sprint / 200m easy". */
 function formatStepLine(step: Step): string {
   if (step.repeat && step.steps?.length) {
-    return `${step.repeat} × ${step.steps.map(formatStep).join(" / ")}`;
+    // A strength set reads "4 sets × 10 Barbell Bench Press @ 60kg / 2min rest";
+    // an interval block keeps the shorter "3 × 200m sprint / 200m easy".
+    const isSet = step.steps.some((s) => s.exercise);
+    const rounds = isSet ? `${step.repeat} sets` : `${step.repeat}`;
+    return `${rounds} × ${step.steps.map(formatStep).join(" / ")}`;
   }
+  if (step.exercise) return formatStep(step);
   return `${step.kind ?? "run"}: ${formatStep(step)}`;
 }
 
@@ -139,7 +169,10 @@ export default function Plan() {
                   {w.done && <IconCheck />}
                 </button>
                 <div className="workout-main">
-                  <div className="workout-date">{formatWorkoutDate(w.date)}</div>
+                  <div className="workout-date">
+                    {formatWorkoutDate(w.date)}
+                    {SPORT_LABELS[w.sport] && <span className="workout-sport"> · {SPORT_LABELS[w.sport]}</span>}
+                  </div>
                   <div className="workout-type">{w.type}</div>
                   {w.description && <div className="workout-desc">{w.description}</div>}
                   {w.steps && w.steps.length > 0 && (
