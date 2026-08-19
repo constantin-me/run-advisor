@@ -1,21 +1,24 @@
 import asyncio
 import logging
 from datetime import date
+from functools import lru_cache
 
+from garminconnect import exercises as exercise_catalog
 from garminconnect.workout import (
     ConditionType,
     ExecutableStep,
     RepeatGroup,
-    RunningWorkout,
     StepType,
     TargetType,
     WorkoutSegment,
+    create_strength_exercise_step,
 )
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Activity, PlanWorkout, TrainingPlan, User
 from app.garmin.client import get_client
+from app.garmin.sports import Sport, get_sport, upload_callable
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +107,14 @@ _STEP_KINDS: dict[str, tuple[int, str, int]] = {
     "rest": (StepType.REST, "rest", 5),
 }
 
+# Fallback category when an exercise name can't be matched in Garmin's catalog.
+# The workout still runs — the watch just shows the generic category, and the
+# requested name is preserved in the step description.
+_FALLBACK_CATEGORY = "TOTAL_BODY"
+
+# Seconds per repetition, for estimating how long a strength block takes.
+_SECONDS_PER_REP = 3.0
+
 # Rough speed (m/s) per intensity level, used only to estimate how long a
 # distance-based step takes so estimatedDurationInSecs is sane. Scaled by the
 # athlete's 5K prediction when we have one.
@@ -178,6 +189,7 @@ def _build_step(
     distance_m: float | None,
     profile: dict | None,
     max_hr_est: int | None,
+    sport: Sport | None = None,
 ) -> ExecutableStep:
     if distance_m:
         end_condition = {
@@ -204,29 +216,13 @@ def _build_step(
     # so the limits are their real numbers; fall back to a %-of-max estimate,
     # then to referencing a zone number if we have no HR data at all.
     zone = hr_zone_for(workout_type)
-    target_type = {
-        "workoutTargetTypeId": TargetType.HEART_RATE_ZONE,
-        "workoutTargetTypeKey": "heart.rate.zone",
-        "displayOrder": 4,
-    }
-
-    extra: dict = {}
-    hr_range = _resolve_hr_range(zone, profile, max_hr_est)
-    if hr_range is not None:
-        lo, hi = hr_range
-        # Custom HR target: raw bpm bounds, no zoneNumber. Garmin's Connect
-        # workout API takes targetValueOne/Two as the low/high heart rate.
-        extra["targetValueOne"] = lo
-        extra["targetValueTwo"] = hi
-    else:
-        extra["zoneNumber"] = zone
+    extra = _target_for(zone, profile, max_hr_est, no_target=False, sport=sport)
 
     return ExecutableStep(
         stepOrder=1,
         stepType={"stepTypeId": StepType.INTERVAL, "stepTypeKey": "interval", "displayOrder": 3},
         endCondition=end_condition,
         endConditionValue=end_value,
-        targetType=target_type,
         **extra,
     )
 
@@ -278,9 +274,21 @@ def _end_condition(step: dict) -> tuple[dict, float | None]:
     )
 
 
-def _target_for(zone: int, profile: dict | None, max_hr_est: int | None, *, no_target: bool) -> dict:
-    """Target block plus the bpm bounds, as kwargs for ExecutableStep."""
-    if no_target:
+def _target_for(
+    zone: int,
+    profile: dict | None,
+    max_hr_est: int | None,
+    *,
+    no_target: bool,
+    sport: Sport | None = None,
+) -> dict:
+    """Target block plus the bpm bounds, as kwargs for ExecutableStep.
+
+    Only sports where heart rate is the honest governor get an HR target. A
+    lifting set, a yoga hold or an in-water interval get none — a bpm range
+    there is either meaningless or actively wrong (HR straps read badly in
+    water, and load, not heart rate, drives a strength set)."""
+    if no_target or (sport is not None and sport.target != "hr"):
         return {
             "targetType": {
                 "workoutTargetTypeId": TargetType.NO_TARGET,
@@ -306,10 +314,107 @@ def _target_for(zone: int, profile: dict | None, max_hr_est: int | None, *, no_t
     return out
 
 
+def _normalize_exercise(name: str) -> str:
+    """Fold an exercise name to a comparable form.
+
+    Garmin's catalog hyphenates and singularizes inconsistently ("Pull-up",
+    "Banded Push-ups"), and a coach writes "pull ups". Punctuation and trailing
+    plurals are the only differences that matter, so strip both."""
+    words = "".join(ch if ch.isalnum() else " " for ch in name.lower()).split()
+    # Drop a trailing plural "s", but never off a word that ends in "ss"
+    # ("press", "cross") where the s is part of the word.
+    return " ".join(
+        w[:-1] if len(w) > 2 and w.endswith("s") and not w.endswith("ss") else w for w in words
+    )
+
+
+@lru_cache(maxsize=1)
+def _normalized_catalog() -> list[tuple[str, dict]]:
+    """(normalized name, entry) for the whole catalog, shortest name first so an
+    ambiguous match resolves to the least-qualified variant."""
+    entries = [(_normalize_exercise(e["name"]), e) for e in exercise_catalog.EXERCISES]
+    return sorted(entries, key=lambda pair: len(pair[0]))
+
+
+def _best_containing(catalog: list[tuple[str, dict]], needle: str) -> dict | None:
+    """Shortest catalog entry containing `needle`, preferring one that ends on
+    the same movement word. "barbell squat" is inside "barbell squat clean",
+    but a squat is what was asked for — the trailing word is what names the
+    movement, so a candidate ending in it wins."""
+    if not needle:
+        return None
+    matches = [e for norm, e in catalog if needle in norm]
+    if not matches:
+        return None
+    last_word = needle.split()[-1]
+    same_movement = [e for e in matches if _normalize_exercise(e["name"]).endswith(last_word)]
+    return (same_movement or matches)[0]
+
+
+def _resolve_exercise(name: str) -> tuple[str, str]:
+    """Map a human exercise name to Garmin's (category, exerciseName) pair.
+
+    The coach writes display names ("Barbell Bench Press"); Garmin wants enum
+    values from its own 1500-entry catalog. Exact match first, then a
+    normalized exact match, then a normalized substring search, then the last
+    two words alone (equipment qualifiers like "cable" are what usually miss).
+    Anything still unmatched degrades to a generic category rather than failing
+    the whole workout — the athlete keeps the session, just with a less
+    specific label on the watch."""
+    raw = (name or "").strip()
+    if not raw:
+        return _FALLBACK_CATEGORY, ""
+
+    entry = exercise_catalog.resolve(raw)
+    if entry is None:
+        needle = _normalize_exercise(raw)
+        catalog = _normalized_catalog()
+        entry = next((e for norm, e in catalog if norm == needle), None)
+        if entry is None:
+            # Compound words split differently on each side ("Lat Pulldown" vs
+            # Garmin's "Lat Pull-down"), so compare with spacing removed too.
+            squashed = needle.replace(" ", "")
+            entry = next((e for norm, e in catalog if norm.replace(" ", "") == squashed), None)
+        if entry is None:
+            entry = _best_containing(catalog, needle)
+        if entry is None:
+            words = needle.split()
+            if len(words) > 2:
+                entry = _best_containing(catalog, " ".join(words[-2:]))
+
+    if entry is None:
+        logger.warning("Unknown exercise %r — falling back to %s", raw, _FALLBACK_CATEGORY)
+        return _FALLBACK_CATEGORY, ""
+    return entry["category"], entry.get("exercise") or ""
+
+
+def _build_exercise_step(step: dict, order: int, child_step_id: int | None) -> ExecutableStep:
+    """One rep-based strength step (an exercise inside a set)."""
+    category, exercise_name = _resolve_exercise(str(step.get("exercise") or ""))
+    reps = max(1, int(step.get("reps") or 1))
+    weight = step.get("weight_kg")
+    built = create_strength_exercise_step(
+        category,
+        order,
+        reps,
+        exercise_name=exercise_name,
+        weight_kg=float(weight) if weight else None,
+    )
+    if child_step_id is not None:
+        built.childStepId = child_step_id
+    # Keep the requested name visible even when the catalog lookup landed on a
+    # generic category.
+    note = step.get("note") or (step.get("exercise") if not exercise_name else None)
+    if note:
+        built.description = str(note)[:255]
+    return built
+
+
 def _build_structured_steps(
     steps: list[dict],
     profile: dict | None,
     max_hr_est: int | None,
+    sport: Sport | None = None,
 ) -> list:
     """Expand the step schema into Garmin's step tree.
 
@@ -328,10 +433,12 @@ def _build_structured_steps(
         nonlocal order
         order += 1
         kind = (step.get("kind") or "run").strip().lower()
+        if kind == "exercise" or step.get("exercise"):
+            return _build_exercise_step(step, order, child_step_id)
         type_id, type_key, display = _STEP_KINDS.get(kind, _STEP_KINDS["run"])
         end_condition, end_value = _end_condition(step)
         zone = _intensity_zone(step)
-        extra = _target_for(zone, profile, max_hr_est, no_target=kind == "rest")
+        extra = _target_for(zone, profile, max_hr_est, no_target=kind == "rest", sport=sport)
         if child_step_id is not None:
             extra["childStepId"] = child_step_id
         if step.get("note"):
@@ -392,14 +499,17 @@ def _speed_scale(profile: dict | None) -> float:
     return max(0.5, min(2.0, speed_5k / _INTENSITY_SPEED[4]))
 
 
-def _estimate_duration(steps: list[dict], profile: dict | None) -> int:
+def _estimate_duration(steps: list[dict], profile: dict | None, sport: Sport | None = None) -> int:
     """Total expected duration, expanding repeats. Distance-based steps are
-    converted with the per-intensity speed table."""
+    converted with the per-intensity speed table; rep-based ones with a flat
+    seconds-per-rep, which is all a strength estimate can honestly be."""
     scale = _speed_scale(profile)
 
     def leaf_seconds(step: dict) -> float:
         if step.get("duration_s"):
             return float(step["duration_s"])
+        if step.get("reps"):
+            return float(step["reps"]) * _SECONDS_PER_REP
         if step.get("distance_m"):
             speed = _INTENSITY_SPEED[_intensity_zone(step)] * scale
             return float(step["distance_m"]) / speed
@@ -417,7 +527,7 @@ def _estimate_duration(steps: list[dict], profile: dict | None) -> int:
     return int(total)
 
 
-def build_running_workout(
+def build_workout(
     workout_type: str,
     description: str | None,
     distance_m,
@@ -425,16 +535,24 @@ def build_running_workout(
     profile: dict | None = None,
     max_hr_est: int | None = None,
     steps: list[dict] | None = None,
-) -> RunningWorkout:
+    sport: str | Sport | None = None,
+):
+    """Build the payload for one workout in any supported sport.
+
+    The sport decides three things and nothing else in here changes: which
+    workout model wraps the payload, the sportType on the segment, and whether
+    steps carry heart-rate targets (see app/garmin/sports.py)."""
+    resolved = sport if isinstance(sport, Sport) else get_sport(sport)
+
     if steps:
-        workout_steps = _build_structured_steps(steps, profile, max_hr_est)
-        duration_s = _estimate_duration(steps, profile)
+        workout_steps = _build_structured_steps(steps, profile, max_hr_est, resolved)
+        duration_s = _estimate_duration(steps, profile, resolved)
     else:
         distance = float(distance_m) if distance_m is not None else None
         pace = float(pace_s_per_km) if pace_s_per_km is not None else None
         # Pace no longer drives the step target (heart rate does), but it's
         # still the best estimate we have for the workout's expected duration.
-        workout_steps = [_build_step(workout_type, distance, profile, max_hr_est)]
+        workout_steps = [_build_step(workout_type, distance, profile, max_hr_est, resolved)]
 
         if distance and pace:
             duration_s = int(distance / (1000.0 / pace))
@@ -443,18 +561,20 @@ def build_running_workout(
         else:
             duration_s = 1800
 
-    return RunningWorkout(
+    return resolved.workout_cls(
         workoutName=workout_type[:50],
+        sportType=resolved.sport_type,
         estimatedDurationInSecs=duration_s,
         description=description[:255] if description else None,
         workoutSegments=[
             WorkoutSegment(
                 segmentOrder=1,
-                sportType={"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
+                sportType=resolved.sport_type,
                 workoutSteps=workout_steps,
             )
         ],
     )
+
 
 
 async def _remove_from_garmin(client, workout: PlanWorkout) -> None:
@@ -489,7 +609,8 @@ async def _remove_from_garmin(client, workout: PlanWorkout) -> None:
 async def _push_workout(client, workout: PlanWorkout, profile: dict | None, max_hr_est: int | None) -> None:
     """Build, upload and schedule one workout, stamping the Garmin ids onto the
     row. Raises on failure — callers decide how loud to be about it."""
-    built = build_running_workout(
+    sport = get_sport(workout.sport)
+    built = build_workout(
         workout.workout_type,
         workout.description,
         workout.target_distance_m,
@@ -497,8 +618,9 @@ async def _push_workout(client, workout: PlanWorkout, profile: dict | None, max_
         profile=profile,
         max_hr_est=max_hr_est,
         steps=workout.steps,
+        sport=sport,
     )
-    upload_result = await asyncio.to_thread(client.upload_running_workout, built)
+    upload_result = await asyncio.to_thread(upload_callable(client, sport), built)
     workout_id = upload_result.get("workoutId")
     if workout_id is None:
         raise ValueError(f"no workoutId in upload response: {upload_result}")

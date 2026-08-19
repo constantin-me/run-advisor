@@ -7,7 +7,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "aiogram>=3.15",
-    "garminconnect>=0.2.19",
+    # 0.3.x is where the typed per-sport workout models, the strength step helpers
+    # and the exercise catalog live.
+    "garminconnect>=0.3.11",
     "openai>=1.60",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
@@ -20,5 +22,15 @@ dependencies = [
     "timezonefinder>=6.5",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
 [tool.setuptools]
 packages = ["app"]
+
+[tool.pytest.ini_options]
+# Tests import the app package from the backend root.
+pythonpath = ["."]
+testpaths = ["tests"]
