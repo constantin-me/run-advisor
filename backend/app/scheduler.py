@@ -7,6 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select
 
+from app.coach.constraints import filter_reasons, suppressed_topics_for
 from app.coach.goals import evaluate_goal_achievements, format_achievement_directive
 from app.coach.recovery import compute_recovery_status
 from app.config import settings
@@ -92,12 +93,14 @@ async def run_user_progress(user_id: int, day: date) -> None:
             )
             recovery = None
 
+        # Standing instructions bind the automated pushes too — a user who told
+        # the coach to leave their sleep alone must not get it quoted back at
+        # them at 7am.
+        suppressed = await suppressed_topics_for(db, user)
+
         if recovery is not None and recovery.level != "green":
-            reasons = (
-                "; ".join(recovery.reasons)
-                if recovery.reasons
-                else "no specific signal recorded"
-            )
+            visible = filter_reasons(recovery.reasons, suppressed)
+            reasons = "; ".join(visible) if visible else "no specific signal recorded"
             instruction = (
                 f"IMPORTANT: recovery signals for {recovery.metric_date.isoformat()} are flagged "
                 f"({recovery.level}) — reasons: {reasons}. Lead the message with this and give one "
@@ -108,7 +111,7 @@ async def run_user_progress(user_id: int, day: date) -> None:
         # is safe to call unconditionally when a location is set. Uses the
         # user's own timezone (from geocoding) so "upcoming" is their local
         # next day, not UTC's.
-        if user.latitude is not None and user.longitude is not None:
+        if user.latitude is not None and user.longitude is not None and "weather" not in suppressed:
             forecast = await get_forecast(
                 float(user.latitude),
                 float(user.longitude),
@@ -170,7 +173,8 @@ def _fmt_delta(value, unit: str, *, lower_is_better: bool) -> str:
     return f"{arrow}{abs(value)}{unit} ({tag})"
 
 
-def _progress_instruction(p: dict) -> str:
+def _progress_instruction(p: dict, suppressed: set[str] | None = None) -> str:
+    suppressed = suppressed or set()
     c, d = p["current"], p["deltas"]
     lines = [
         f"This is the {p['period_days']}-day progress check-in. Deterministic stats, "
@@ -179,9 +183,14 @@ def _progress_instruction(p: dict) -> str:
         f"({_fmt_delta(d['distance_km'], ' km', lower_is_better=False)})",
         f"- Avg pace: {c['avg_pace_s_per_km']}s/km ({_fmt_delta(d['avg_pace_s_per_km'], 's/km', lower_is_better=True)})",
         f"- Avg run HR: {c['avg_hr']} ({_fmt_delta(d['avg_hr'], ' bpm', lower_is_better=True)})",
-        f"- Resting HR: {c['avg_resting_hr']} ({_fmt_delta(d['avg_resting_hr'], ' bpm', lower_is_better=True)})",
-        f"- VO2max: {c['vo2max']} ({_fmt_delta(d['vo2max'], '', lower_is_better=False)})",
     ]
+    if "resting_hr" not in suppressed:
+        lines.append(
+            f"- Resting HR: {c['avg_resting_hr']} "
+            f"({_fmt_delta(d['avg_resting_hr'], ' bpm', lower_is_better=True)})"
+        )
+    if "vo2max" not in suppressed:
+        lines.append(f"- VO2max: {c['vo2max']} ({_fmt_delta(d['vo2max'], '', lower_is_better=False)})")
     # Cross-training counts as training: a fortnight of gym work is a different
     # story from a fortnight off, and the note should say so.
     if c.get("other_sessions") or c.get("strength_sessions"):
@@ -213,7 +222,8 @@ async def run_user_progress_eval(user_id: int) -> None:
         if progress is None:
             return  # no training recorded yet — try again next cycle
 
-        summary = await generate_progress_summary(db, user, _progress_instruction(progress))
+        instruction = _progress_instruction(progress, await suppressed_topics_for(db, user))
+        summary = await generate_progress_summary(db, user, instruction)
 
         user.last_progress_eval_at = datetime.now(timezone.utc)
         await db.commit()

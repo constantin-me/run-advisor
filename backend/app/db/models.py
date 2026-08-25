@@ -187,6 +187,10 @@ class Memory(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     content: Mapped[str] = mapped_column(Text)
+    # "fact" — something learned about the athlete.
+    # "constraint" — a standing instruction they gave the coach ("don't look at
+    # my sleep"), always injected and enforced. See app/coach/constraints.py.
+    kind: Mapped[str] = mapped_column(String, nullable=False, server_default="fact", default="fact")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )

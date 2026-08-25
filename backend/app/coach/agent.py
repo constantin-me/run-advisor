@@ -7,6 +7,12 @@ from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.coach.constraints import (
+    filter_reasons,
+    format_constraint_block,
+    load_constraints,
+    suppressed_topics,
+)
 from app.coach.goals import evaluate_goal_achievements, format_achievement_directive
 from app.coach.prompts import SYSTEM_PROMPT
 from app.coach.recovery import compute_recovery_status
@@ -30,7 +36,9 @@ logger = logging.getLogger(__name__)
 _client = AsyncOpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key)
 
 HISTORY_MESSAGES = 20
-MAX_TOOL_ROUNDS = 5
+# Saving a plan now costs extra rounds: save -> read the verification report ->
+# correct -> verify again. Too low a ceiling would cut the coach off mid-fix.
+MAX_TOOL_ROUNDS = 8
 
 
 async def _load_history(db: AsyncSession, user: User) -> list[dict]:
@@ -110,7 +118,7 @@ def _format_profile(profile: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_recovery(status) -> str:
+def _format_recovery(status, suppressed: set[str] | None = None) -> str:
     today = date.today()
     if status.metric_date == today:
         when = "today's"
@@ -118,9 +126,8 @@ def _format_recovery(status) -> str:
         when = "yesterday's"
     else:
         when = f"{status.metric_date.isoformat()}'s"
-    reasons = (
-        "; ".join(status.reasons) if status.reasons else "no specific signal recorded"
-    )
+    visible = filter_reasons(status.reasons, suppressed or set())
+    reasons = "; ".join(visible) if visible else "no specific signal recorded"
     return f"Recovery flag ({when} data): {status.level} — {reasons}"
 
 
@@ -153,6 +160,14 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
     to call a tool first."""
     system_prompt = SYSTEM_PROMPT
 
+    # Standing instructions come first and in full: they change how everything
+    # below is allowed to be used.
+    constraints = await load_constraints(db, user)
+    suppressed = suppressed_topics([c["text"] for c in constraints])
+    block = format_constraint_block(constraints, suppressed)
+    if block:
+        system_prompt += "\n\n" + block
+
     memories = await list_recent_memories(user.telegram_id)
     if memories:
         system_prompt += "\n\nKnown facts about this user:\n" + "\n".join(
@@ -163,7 +178,7 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
         profile_block = _format_profile(user.garmin_profile)
         if profile_block:
             system_prompt += "\n\n" + profile_block
-        if not user.garmin_profile.get("weight_kg"):
+        if not user.garmin_profile.get("weight_kg") and "weight" not in suppressed:
             system_prompt += (
                 "\n\nWeight is unknown (not on file in Garmin). If it becomes relevant to the "
                 "user's question (e.g. fueling, load), ask them for it once, then store_memory it."
@@ -181,7 +196,7 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
     try:
         recovery = await compute_recovery_status(db, user)
         if recovery is not None and recovery.level != "green":
-            system_prompt += "\n\n" + _format_recovery(recovery)
+            system_prompt += "\n\n" + _format_recovery(recovery, suppressed)
     except Exception:
         # Never let a bug in the recovery rule engine break chat itself.
         logger.exception("Recovery status computation failed for user_id=%s", user.id)
@@ -219,7 +234,7 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
     else:
         system_prompt += "\n\nNo active training plan."
 
-    if user.latitude is not None:
+    if user.latitude is not None and "weather" not in suppressed:
         try:
             forecast = await get_weather_forecast(db, user, days=2)
             if "error" not in forecast:

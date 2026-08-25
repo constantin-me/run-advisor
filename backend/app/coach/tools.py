@@ -6,7 +6,9 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.coach.constraints import filter_metrics, filter_reasons, suppressed_topics_for
 from app.coach.recovery import compute_recovery_status
+from app.coach.verify import verify_plan, verify_workout
 from app.db.models import Activity, DailyMetric, Goal, PlanWorkout, TrainingPlan, User
 from app.garmin.sports import DEFAULT_SPORT, get_sport, sport_keys
 from app.weather.client import geocode, get_forecast
@@ -153,6 +155,21 @@ TOOL_SCHEMAS: list[dict] = [
                     "goal_id": {
                         "type": "integer",
                         "description": "Optional goal id this plan targets",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": (
+                            "ISO date the athlete asked the plan to start. Given, the saved plan "
+                            "is checked against it and a partial plan is reported back to you."
+                        ),
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": (
+                            "ISO date the athlete asked the plan to run through. Always set this "
+                            "for a dated request ('8 weeks', 'until the race') — it is how a plan "
+                            "that stops halfway gets caught."
+                        ),
                     },
                     "workouts": {
                         "type": "array",
@@ -380,10 +397,30 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "store_memory",
-            "description": "Store a durable fact about the user for future conversations (e.g. 'has a history of IT band issues').",
+            "description": (
+                "Remember something durable about the user. kind='fact' for what you learned "
+                "about them ('has a history of IT band issues'); kind='constraint' for an "
+                "instruction they gave you about how to coach ('don't look at my sleep — I don't "
+                "wear the watch at night'). Store a constraint the moment they ask you to stop "
+                "doing something; it binds every future conversation."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"fact": {"type": "string"}},
+                "properties": {
+                    "fact": {
+                        "type": "string",
+                        "description": (
+                            "Written so it still makes sense months later, in their terms — for a "
+                            "constraint, phrase it as the instruction itself plus the reason they "
+                            "gave."
+                        ),
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["fact", "constraint"],
+                        "description": "Defaults to fact. Use constraint for 'stop/don't/never' instructions.",
+                    },
+                },
                 "required": ["fact"],
             },
         },
@@ -429,7 +466,10 @@ async def get_daily_metrics(db: AsyncSession, user: User, days: int = 7) -> list
         .where(DailyMetric.user_id == user.id, DailyMetric.metric_date >= since)
         .order_by(DailyMetric.metric_date.desc())
     )
-    return [_metric_to_dict(m) for m in result.scalars().all()]
+    metrics = [_metric_to_dict(m) for m in result.scalars().all()]
+    # A "don't look at my sleep" instruction is enforced at the source: the
+    # coach never receives the field, so it can't quote it by accident.
+    return filter_metrics(metrics, await suppressed_topics_for(db, user))
 
 
 async def get_recent_activities(db: AsyncSession, user: User, n: int = 5) -> list[dict]:
@@ -594,6 +634,7 @@ async def get_training_plan(db: AsyncSession, user: User) -> dict | None:
     )
     workouts = [
         {
+            "id": w.id,
             "date": w.scheduled_date.isoformat(),
             "sport": w.sport or DEFAULT_SPORT,
             "type": w.workout_type,
@@ -608,6 +649,9 @@ async def get_training_plan(db: AsyncSession, user: User) -> dict | None:
                 else None
             ),
             "done": w.done,
+            # Verification needs to know what actually reached the watch — the
+            # coach must never report a session as synced on faith.
+            "synced_to_garmin": w.garmin_workout_id is not None,
         }
         for w in wk_result.scalars().all()
     ]
@@ -620,6 +664,8 @@ async def save_training_plan(
     title: str,
     workouts: list[dict],
     goal_id: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     old_plans = await db.execute(
         select(TrainingPlan).where(
@@ -672,11 +718,19 @@ async def save_training_plan(
     # press Sync. Failure-safe: a Garmin problem is reported in the result, not
     # raised, so the coach can still answer.
     garmin = await _autosync_plan(db, user)
+    # Audit what actually landed in the database rather than what was intended:
+    # the result the coach reads is the saved state, not its own request.
+    verification = verify_plan(
+        await get_training_plan(db, user),
+        requested_start=start_date,
+        requested_end=end_date,
+    )
     return {
         "id": plan.id,
         "title": title,
         "workout_count": len(workouts),
         "garmin": garmin,
+        "verification": verification,
     }
 
 
@@ -751,6 +805,16 @@ async def schedule_workout(
     # expired attribute afterwards triggers a lazy refresh (illegal here — it
     # blows up with MissingGreenlet in async context).
     plan_title = plan.title
+    saved = {
+        "date": workout.scheduled_date.isoformat(),
+        "sport": workout.sport,
+        "type": workout.workout_type,
+        "steps": workout.steps,
+        "distance_m": float(workout.target_distance_m) if workout.target_distance_m is not None else None,
+        "pace_s_per_km": (
+            float(workout.target_pace_s_per_km) if workout.target_pace_s_per_km is not None else None
+        ),
+    }
     garmin = await sync_workout_to_garmin(db, user, workout)
     return {
         "date": scheduled.isoformat(),
@@ -759,6 +823,7 @@ async def schedule_workout(
         "replaced_existing": replaced,
         "step_count": len(steps) if steps else 0,
         "garmin": garmin,
+        "verification": verify_workout(saved, garmin),
     }
 
 
@@ -807,15 +872,63 @@ async def get_recovery_status(db: AsyncSession, user: User) -> dict:
             "message": "not enough recent data — try /sync first",
         }
 
+    suppressed = await suppressed_topics_for(db, user)
     return {
         "level": status.level,
-        "reasons": status.reasons,
+        "reasons": filter_reasons(status.reasons, suppressed),
         "metric_date": status.metric_date.isoformat(),
-        "training_readiness": status.training_readiness,
-        "hrv_delta_pct": status.hrv_delta_pct,
-        "rhr_delta": status.rhr_delta,
+        "training_readiness": None if "training_readiness" in suppressed else status.training_readiness,
+        "hrv_delta_pct": None if "hrv" in suppressed else status.hrv_delta_pct,
+        "rhr_delta": None if "resting_hr" in suppressed else status.rhr_delta,
     }
 
+
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_memory",
+            "description": (
+                "Remove a stored fact or standing instruction by its id, when the user lifts or "
+                "replaces it ('you can look at my sleep again'). Standing instructions are listed "
+                "with their ids in your context."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"memory_id": {"type": "integer"}},
+                "required": ["memory_id"],
+            },
+        },
+    }
+)
+
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_training_plan",
+            "description": (
+                "Audit the athlete's active plan as it is actually stored: coverage of a "
+                "requested date range, workout count, sports, structured steps, rest spacing, "
+                "weekly volume and progression, and what really reached the watch. Call this "
+                "before telling the athlete a plan is done, and after any correction."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "ISO date the plan was asked to start (optional)",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "ISO date the plan was asked to run through (optional)",
+                    },
+                },
+            },
+        },
+    }
+)
 
 TOOL_SCHEMAS.append(
     {
@@ -880,6 +993,8 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
             title=arguments["title"],
             workouts=arguments["workouts"],
             goal_id=arguments.get("goal_id"),
+            start_date=arguments.get("start_date"),
+            end_date=arguments.get("end_date"),
         )
     if name == "schedule_workout":
         return await schedule_workout(
@@ -895,6 +1010,12 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
         )
     if name == "find_exercises":
         return find_exercises(arguments["term"])
+    if name == "verify_training_plan":
+        return verify_plan(
+            await get_training_plan(db, user),
+            requested_start=arguments.get("start_date"),
+            requested_end=arguments.get("end_date"),
+        )
     if name == "set_location":
         return await set_location(db, user, city=arguments["city"])
     if name == "get_weather_forecast":
@@ -904,7 +1025,13 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
     if name == "search_memory":
         return await recall_memories(user.telegram_id, arguments["query"])
     if name == "store_memory":
-        await memory_store(user.telegram_id, arguments["fact"])
-        return {"stored": True}
+        kind = arguments.get("kind", "fact")
+        memory_id = await memory_store(user.telegram_id, arguments["fact"], kind=kind)
+        return {"stored": True, "id": memory_id, "kind": kind}
+    if name == "forget_memory":
+        from app.memory.client import forget_memory
+
+        removed = await forget_memory(user.telegram_id, int(arguments["memory_id"]))
+        return {"removed": removed}
 
     return {"error": f"unknown tool {name}"}
