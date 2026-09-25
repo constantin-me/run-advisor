@@ -16,6 +16,7 @@ from app.coach.constraints import (
 from app.coach.goals import evaluate_goal_achievements, format_achievement_directive
 from app.coach.prompts import SYSTEM_PROMPT
 from app.coach.recovery import compute_recovery_status
+from app.coach.router import Lane, classify, lane
 from app.coach.tools import (
     TOOL_SCHEMAS,
     _format_hour_label,
@@ -250,12 +251,25 @@ async def _build_system_prompt(db: AsyncSession, user: User) -> str:
     return system_prompt
 
 
+def _tools_for(active: Lane) -> list[dict]:
+    if active.tools is None:
+        return TOOL_SCHEMAS
+    allowed = set(active.tools)
+    return [t for t in TOOL_SCHEMAS if t["function"]["name"] in allowed]
+
+
 async def _run_tool_loop(
-    db: AsyncSession, user: User, messages: list[dict]
+    db: AsyncSession, user: User, messages: list[dict], active: Lane | None = None
 ) -> AsyncGenerator[str, None]:
     """Drive the OpenAI-compatible tool-calling loop over an already-built
     message list, yielding content tokens as they stream. Does not touch
-    chat_messages — callers decide what (if anything) to persist."""
+    chat_messages — callers decide what (if anything) to persist.
+
+    The lane decides which model runs and which tools it can see; without one
+    this is the full coach on every tool, which is what the scheduled jobs
+    want."""
+    active = active or lane("coach")
+    tools = _tools_for(active)
     for _ in range(MAX_TOOL_ROUNDS):
         content_acc = ""
         tool_calls_acc: dict[int, dict] = {}
@@ -267,9 +281,9 @@ async def _run_tool_loop(
 
         try:
             stream = await _client.chat.completions.create(
-                model=settings.llm_model,
+                model=active.model,
                 messages=messages,
-                tools=TOOL_SCHEMAS,
+                tools=tools,
                 stream=True,
                 **create_kwargs,
             )
@@ -338,10 +352,30 @@ async def _run_tool_loop(
         yield "I ran out of tool-call rounds — try rephrasing your question."
 
 
+def _user_turn(text: str, image_data_url: str | None) -> dict:
+    """The outgoing user message. With an image it becomes the multimodal
+    content-parts form every OpenAI-compatible vision endpoint takes."""
+    if image_data_url is None:
+        return {"role": "user", "content": text}
+    parts: list[dict] = [{"type": "image_url", "image_url": {"url": image_data_url}}]
+    if text:
+        parts.insert(0, {"type": "text", "text": text})
+    return {"role": "user", "content": parts}
+
+
 async def stream_chat(
-    db: AsyncSession, user: User, user_message: str
+    db: AsyncSession,
+    user: User,
+    user_message: str,
+    image_data_url: str | None = None,
 ) -> AsyncGenerator[str, None]:
-    db.add(ChatMessage(user_id=user.id, role="user", content=user_message))
+    # Stored history is text: an image is recorded as a marker plus whatever
+    # they wrote with it, so later turns know a photo was part of the thread
+    # without carrying its bytes around forever.
+    stored = user_message
+    if image_data_url is not None:
+        stored = f"[sent a photo] {user_message}".strip()
+    db.add(ChatMessage(user_id=user.id, role="user", content=stored))
     await db.commit()
 
     # Ground the reply in near-current data: if the last Garmin sync is older
@@ -351,11 +385,18 @@ async def stream_chat(
 
     final_text = ""
     try:
-        history = await _load_history(db, user)
-        system_prompt = await _build_system_prompt(db, user)
-        messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
+        active = lane(await classify(user_message, has_image=image_data_url is not None))
+        logger.info("Routing user_id=%s to lane=%s (%s)", user.id, active.name, active.model)
 
-        async for token in _run_tool_loop(db, user, messages):
+        history = await _load_history(db, user)
+        system_prompt = await _build_system_prompt(db, user) + active.prompt_suffix
+        messages: list[dict] = [{"role": "system", "content": system_prompt}, *history]
+        if image_data_url is not None:
+            # The stored history line for this turn is only the text marker, so
+            # the picture itself is attached here.
+            messages[-1] = _user_turn(user_message, image_data_url)
+
+        async for token in _run_tool_loop(db, user, messages, active):
             final_text += token
             yield token
     except Exception:
@@ -394,7 +435,9 @@ async def generate_progress_summary(
         return ""
 
 
-async def stream_reply(telegram_id: int, text: str) -> AsyncGenerator[str, None]:
+async def stream_reply(
+    telegram_id: int, text: str, image_data_url: str | None = None
+) -> AsyncGenerator[str, None]:
     async with async_session() as db:
         result = await db.execute(select(User).where(User.telegram_id == telegram_id))
         user = result.scalar_one_or_none()
@@ -404,5 +447,5 @@ async def stream_reply(telegram_id: int, text: str) -> AsyncGenerator[str, None]
             await db.commit()
             await db.refresh(user)
 
-        async for token in stream_chat(db, user, text):
+        async for token in stream_chat(db, user, text, image_data_url):
             yield token

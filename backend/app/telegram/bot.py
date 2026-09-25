@@ -1,3 +1,5 @@
+import base64
+import logging
 import time
 from collections.abc import AsyncIterator
 
@@ -17,6 +19,8 @@ from app.config import settings
 from app.db.models import User
 from app.db.session import async_session
 from app.telegram.formatting import has_visible_text, to_telegram_html
+
+logger = logging.getLogger(__name__)
 
 bot = Bot(token=settings.telegram_bot_token)
 dp = Dispatcher()
@@ -284,6 +288,42 @@ async def chat(message: Message) -> None:
     await _stream_agent_reply(
         message.chat.id,
         stream_reply(telegram_id=telegram_id, text=message.text),
+    )
+
+
+# Telegram serves several sizes of every photo; the largest is the last. Cap
+# what we forward to the model — a 4MB upload costs tokens and adds latency
+# without making a whiteboard any more readable.
+MAX_PHOTO_BYTES = 4 * 1024 * 1024
+
+
+@dp.message(F.photo)
+async def photo(message: Message) -> None:
+    """A photo of a workout — a whiteboard, a screenshot, a watch face — goes to
+    the vision lane, with the caption as the question."""
+    from app.coach.agent import stream_reply
+
+    largest = message.photo[-1]
+    if largest.file_size and largest.file_size > MAX_PHOTO_BYTES:
+        await _send_html(message.chat.id, "That image is too large for me — send a smaller one?")
+        return
+
+    try:
+        buffer = await bot.download(largest)
+        raw = buffer.read()
+    except Exception:
+        logger.exception("Failed to download photo from telegram_id=%s", message.from_user.id)
+        await _send_html(message.chat.id, "I couldn't open that image. Mind sending it again?")
+        return
+
+    data_url = "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+    await _stream_agent_reply(
+        message.chat.id,
+        stream_reply(
+            telegram_id=message.from_user.id,
+            text=(message.caption or "").strip(),
+            image_data_url=data_url,
+        ),
     )
 
 

@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     # "none" on the chat/completions endpoint. Leave unset for models/
     # providers that don't recognize the field.
     llm_reasoning_effort: str | None = None
+    # Small, cheap model for lane classification and the read-only lanes
+    # (quick answers, small talk). Falls back to llm_model when unset.
+    llm_router_model: str | None = None
+    # Multimodal model used when the athlete sends a photo. Falls back to
+    # llm_model, which is fine when that model already takes images.
+    llm_vision_model: str | None = None
 
     jwt_secret: str
     jwt_algorithm: str = "HS256"
