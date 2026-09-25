@@ -25,6 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    # In-memory database for the tests that exercise a query rather than a
+    # pure function (e.g. the check-in data gate).
+    "aiosqlite>=0.20",
 ]
 
 [tool.setuptools]
@@ -34,3 +38,4 @@ packages = ["app"]
 # Tests import the app package from the backend root.
 pythonpath = ["."]
 testpaths = ["tests"]
+asyncio_mode = "strict"

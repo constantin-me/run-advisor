@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select, update
@@ -864,6 +864,34 @@ async def get_weather_forecast(db: AsyncSession, user: User, days: int = 3) -> d
     return {"location": user.location_name, **forecast}
 
 
+async def pause_check_ins(db: AsyncSession, user: User, reason: str) -> dict:
+    """Silence every automated push until the athlete trains again.
+
+    Also stored as a standing instruction, so the coach reads back *why* it went
+    quiet in later conversations instead of treating the silence as a mystery."""
+    from app.memory.client import store_memory as memory_store
+
+    user.nudges_muted_at = datetime.now(timezone.utc)
+    user.nudges_muted_reason = reason
+    await db.commit()
+
+    await memory_store(
+        user.telegram_id,
+        f"Asked not to be messaged ({reason}) on {date.today().isoformat()} — automated check-ins "
+        "are paused until they train again or ask to resume.",
+        kind="constraint",
+    )
+    return {"paused": True, "reason": reason}
+
+
+async def resume_check_ins(db: AsyncSession, user: User) -> dict:
+    was_paused = user.nudges_muted_at is not None
+    user.nudges_muted_at = None
+    user.nudges_muted_reason = None
+    await db.commit()
+    return {"resumed": True, "was_paused": was_paused}
+
+
 async def get_recovery_status(db: AsyncSession, user: User) -> dict:
     status = await compute_recovery_status(db, user)
     if status is None:
@@ -882,6 +910,46 @@ async def get_recovery_status(db: AsyncSession, user: User) -> dict:
         "rhr_delta": None if "resting_hr" in suppressed else status.rhr_delta,
     }
 
+
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "function": {
+            "name": "pause_check_ins",
+            "description": (
+                "Stop all automated messages — daily check-ins, weekly nudges, progress notes. "
+                "Call this the moment the user says they're ill, injured, low, overloaded, taking "
+                "a break, or simply wants you to stop messaging. Do not argue or ask them to "
+                "reconsider. Messages resume on their own the next time they record an activity, "
+                "or when they ask you to resume."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Their reason in their own words, e.g. 'flu, resting this week'",
+                    }
+                },
+                "required": ["reason"],
+            },
+        },
+    }
+)
+
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "function": {
+            "name": "resume_check_ins",
+            "description": (
+                "Turn automated messages back on, when the user says they're ready again. Not "
+                "needed after they log a workout — that resumes them by itself."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+)
 
 TOOL_SCHEMAS.append(
     {
@@ -1028,6 +1096,10 @@ async def execute_tool(db: AsyncSession, user: User, name: str, arguments: dict)
         kind = arguments.get("kind", "fact")
         memory_id = await memory_store(user.telegram_id, arguments["fact"], kind=kind)
         return {"stored": True, "id": memory_id, "kind": kind}
+    if name == "pause_check_ins":
+        return await pause_check_ins(db, user, reason=arguments["reason"])
+    if name == "resume_check_ins":
+        return await resume_check_ins(db, user)
     if name == "forget_memory":
         from app.memory.client import forget_memory
 

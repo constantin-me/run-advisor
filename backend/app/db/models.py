@@ -40,6 +40,14 @@ class User(Base):
     garmin_profile: Mapped[dict | None] = mapped_column(JSON)
     profile_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_progress_eval_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Weekly nudge for a dormant athlete (no plan, or nothing logged in a
+    # while) — the daily check-in has nothing to report to them.
+    last_nudge_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set when they ask to be left alone ("I'm sick", "not in the mood",
+    # "stop messaging me"). While it is set, no automated push goes out. It
+    # clears itself when they train again — the workout is the answer.
+    nudges_muted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    nudges_muted_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
     )
